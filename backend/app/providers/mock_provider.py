@@ -17,6 +17,7 @@ class MockMarketDataProvider(MarketDataProvider):
             tickers=[
                 {"symbol": "S&P500", "price": 5041.3, "change_pct": 0.62},
                 {"symbol": "NAS100", "price": 17812.9, "change_pct": 1.08},
+                {"symbol": "NASDAQ mini", "price": 17925.5, "change_pct": 0.94},
                 {"symbol": "EUR/USD", "price": 1.0824, "change_pct": -0.18},
                 {"symbol": "GBP/USD", "price": 1.2689, "change_pct": 0.24},
                 {"symbol": "GBP/JPY", "price": 191.42, "change_pct": -0.41},

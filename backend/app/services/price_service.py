@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from ..models.schemas import PricesResponse
-from ..providers import MarketDataProvider, MockMarketDataProvider
+from ..providers import MarketDataProvider, get_provider
 
 
 def get_prices_payload(provider: MarketDataProvider | None = None) -> PricesResponse:
-    provider = provider or MockMarketDataProvider()
+    provider = provider or get_provider()
     return provider.get_prices()
