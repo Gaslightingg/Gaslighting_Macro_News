@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -9,6 +10,12 @@ from pathlib import Path
 
 def _start_process(command: list[str], cwd: Path) -> subprocess.Popen:
     return subprocess.Popen(command, cwd=str(cwd))
+
+
+def _find_npm() -> str | None:
+    if os.name == "nt":
+        return shutil.which("npm.cmd") or shutil.which("npm")
+    return shutil.which("npm")
 
 
 def _resolve_dir(name: str) -> Path:
@@ -29,9 +36,19 @@ def main() -> int:
         "8000",
     ]
 
-    frontend_cmd = ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
+    npm_executable = _find_npm()
+    frontend_cmd = [
+        npm_executable or "npm",
+        "run",
+        "dev",
+        "--",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "5173",
+    ]
 
-    frontend_available = shutil.which("npm") is not None
+    frontend_available = npm_executable is not None
     backend_dir = _resolve_dir("backend")
     frontend_dir = _resolve_dir("frontend")
 
@@ -48,7 +65,10 @@ def main() -> int:
     if frontend_available:
         frontend = _start_process(frontend_cmd, cwd=frontend_dir)
     else:
-        print("npm is not available; frontend will not be started.", file=sys.stderr)
+        print(
+            "npm executable not found; frontend will not be started.",
+            file=sys.stderr,
+        )
 
     try:
         while True:
