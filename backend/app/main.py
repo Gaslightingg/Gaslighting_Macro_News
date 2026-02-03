@@ -1,10 +1,11 @@
 from fastapi import FastAPI
 
+from .analytics import build_signals
+
 app = FastAPI(title="Gaslighting Macro News API")
 
 
-@app.get("/api/prices")
-async def get_prices():
+def _mock_prices_payload():
     return {
         "as_of": "2024-03-01T12:00:00Z",
         "tickers": [
@@ -18,8 +19,12 @@ async def get_prices():
     }
 
 
-@app.get("/api/macro")
-async def get_macro():
+@app.get("/api/prices")
+async def get_prices():
+    return _mock_prices_payload()
+
+
+def _mock_macro_payload():
     return {
         "as_of": "2024-03-01",
         "series": [
@@ -106,24 +111,18 @@ async def get_macro():
     }
 
 
+@app.get("/api/macro")
+async def get_macro():
+    return _mock_macro_payload()
+
+
 @app.get("/api/signals")
 async def get_signals():
+    macro = _mock_macro_payload()
+    prices = _mock_prices_payload()
+    tickers = [item["symbol"] for item in prices["tickers"]]
     return {
-        "signals": [
-            {
-                "name": "Risk Appetite",
-                "status": "Bullish",
-                "details": "Credit spreads tightened and cyclicals led the tape.",
-            },
-            {
-                "name": "Liquidity Pulse",
-                "status": "Neutral",
-                "details": "Treasury issuance absorbed without material pressure.",
-            },
-            {
-                "name": "Macro Surprise",
-                "status": "Constructive",
-                "details": "Economic data outperformed consensus for a third week.",
-            },
-        ]
+        "as_of": macro["as_of"],
+        "disclaimer": "Not financial advice",
+        "signals": build_signals(macro["series"], tickers),
     }

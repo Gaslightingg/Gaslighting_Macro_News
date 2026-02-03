@@ -93,18 +93,33 @@ function App() {
       </section>
 
       <section className="section">
-        <h2>Signals</h2>
+        <div className="section-header">
+          <h2>Signals</h2>
+          <span className="section-meta">
+            Updated: {signals?.as_of ?? "Loading..."}
+          </span>
+        </div>
         <div className="grid signals">
           {signals?.signals?.map((signal) => (
-            <article key={signal.name} className="card">
+            <article key={signal.ticker} className="card">
               <div className="card-row">
-                <p className="label">{signal.name}</p>
-                <span className="status">{signal.status}</span>
+                <p className="label">{signal.ticker}</p>
+                <span className={`status ${signal.direction?.toLowerCase()}`}>
+                  {signal.direction}
+                </span>
               </div>
-              <p className="details">{signal.details}</p>
+              <p className="signal-confidence">
+                Confidence: {(signal.confidence * 100).toFixed(0)}%
+              </p>
+              <ul className="signal-reasons">
+                {signal.reasons?.map((reason) => (
+                  <li key={reason}>{reason}</li>
+                ))}
+              </ul>
             </article>
           ))}
         </div>
+        <p className="disclaimer">{signals?.disclaimer ?? "Not financial advice"}</p>
       </section>
     </div>
   );
