@@ -61,13 +61,32 @@ function App() {
       </section>
 
       <section className="section">
-        <h2>Macro data</h2>
-        <div className="grid macro">
-          {macro?.highlights?.map((item) => (
-            <article key={item.label} className="card">
-              <p className="label">{item.label}</p>
-              <p className="value">{item.value}</p>
-            </article>
+        <div className="section-header">
+          <h2>Macro data</h2>
+          <span className="section-meta">
+            Updated: {macro?.as_of ?? "Loading..."}
+          </span>
+        </div>
+        <div className="table card">
+          <div className="table-header">
+            <span>Indicator</span>
+            <span>Value</span>
+            <span>Change</span>
+            <span>Last updated</span>
+          </div>
+          {macro?.series?.map((item) => (
+            <div key={item.name} className="table-row">
+              <span className="table-title">{item.name}</span>
+              <span>{item.value}</span>
+              <span
+                className={`table-change ${
+                  item.change?.startsWith("-") ? "negative" : "positive"
+                }`}
+              >
+                {item.change}
+              </span>
+              <span className="table-date">{item.updated}</span>
+            </div>
           ))}
         </div>
         <p className="commentary">{macro?.commentary ?? "Loading..."}</p>
