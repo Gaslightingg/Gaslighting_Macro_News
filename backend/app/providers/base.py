@@ -9,9 +9,9 @@ class MarketDataProvider(ABC):
     """Base interface for market data providers."""
 
     @abstractmethod
-    def get_prices(self) -> PricesResponse:
+    async def get_prices(self) -> PricesResponse:
         """Return the latest prices payload."""
 
     @abstractmethod
-    def get_macro(self) -> MacroResponse:
+    async def get_macro(self) -> MacroResponse:
         """Return the latest macro payload."""

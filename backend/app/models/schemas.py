@@ -58,6 +58,8 @@ class MacroLatestItem(BaseModel):
     change: str
     updated: str
     category: str
+    available: bool = True
+    error: str | None = None
 
 
 class MacroLatestResponse(BaseModel):
@@ -78,6 +80,8 @@ class MacroSeriesResponse(BaseModel):
     frequency: str
     source: str
     series: List[MacroSeriesPoint]
+    available: bool = True
+    error: str | None = None
 
 
 class SignalItem(BaseModel):

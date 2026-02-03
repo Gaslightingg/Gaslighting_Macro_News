@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api.routes import router as api_router
+from .utils.cache_db import CacheStore
 from .utils.logging import configure_logging
 from .utils.settings import get_settings
 
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Gaslighting Macro News API")
 settings = get_settings()
 origins = settings.parsed_cors_origins()
+CacheStore(settings.cache_db_url)
 logger.info("CORS origins: %s", origins)
 app.add_middleware(
     CORSMiddleware,

@@ -30,29 +30,29 @@ def healthcheck() -> HealthResponse:
 
 
 @router.get("/prices", response_model=PricesResponse)
-def prices() -> PricesResponse:
-    return get_prices_payload()
+async def prices() -> PricesResponse:
+    return await get_prices_payload()
 
 
 @router.get("/macro", response_model=MacroResponse)
-def macro() -> MacroResponse:
-    return get_macro_payload()
+async def macro() -> MacroResponse:
+    return await get_macro_payload()
 
 
 @router.get("/macro/categories", response_model=MacroCategoriesResponse)
-def macro_categories() -> MacroCategoriesResponse:
+async def macro_categories() -> MacroCategoriesResponse:
     return get_categories_payload()
 
 
 @router.get("/macro/latest", response_model=MacroLatestResponse)
-def macro_latest() -> MacroLatestResponse:
-    return get_latest_payload()
+async def macro_latest() -> MacroLatestResponse:
+    return await get_latest_payload()
 
 
 @router.get("/macro/series/{indicator_id}", response_model=MacroSeriesResponse)
-def macro_series(indicator_id: str, range: str = "1y") -> MacroSeriesResponse:
+async def macro_series(indicator_id: str, range: str = "1y") -> MacroSeriesResponse:
     try:
-        return get_series_payload(indicator_id, range)
+        return await get_series_payload(indicator_id, range)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -63,6 +63,14 @@ def macro_refresh() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@router.get("/macro/series", response_model=MacroSeriesResponse)
+async def macro_series_query(indicator: str, range: str = "1y") -> MacroSeriesResponse:
+    try:
+        return await get_series_payload(indicator, range)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.get("/signals", response_model=SignalsResponse)
-def signals() -> SignalsResponse:
-    return get_signals_payload()
+async def signals() -> SignalsResponse:
+    return await get_signals_payload()

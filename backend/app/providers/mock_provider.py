@@ -35,7 +35,7 @@ class MockMarketDataProvider(MarketDataProvider):
     market data APIs, or internal data warehouses.
     """
 
-    def get_prices(self) -> PricesResponse:
+    async def get_prices(self) -> PricesResponse:
         seed = _hour_seed()
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         return PricesResponse(
@@ -79,7 +79,7 @@ class MockMarketDataProvider(MarketDataProvider):
             ],
         )
 
-    def get_macro(self) -> MacroResponse:
+    async def get_macro(self) -> MacroResponse:
         seed = _hour_seed()
         today = datetime.now(timezone.utc).date().isoformat()
         return MacroResponse(

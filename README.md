@@ -27,6 +27,9 @@ Key variables for real data mode:
 - `MARKET_DATA_DB_PATH` for the local SQLite cache.
 - `BACKEND_CORS_ORIGINS` (comma-separated) to allow frontend origins (default `*`).
 - `VITE_API_URL` to override the API base URL in the frontend (defaults to the current host on port 8000).
+- `CACHE_DB_URL` for the persistent cache database (default `sqlite:///./cache.db`).
+- `CACHE_TTL_LATEST`, `CACHE_TTL_SERIES_1Y`, `CACHE_TTL_SERIES_5Y`, `CACHE_TTL_PRICES`, `CACHE_TTL_SIGNALS` to tune caching.
+- `FRED_PMI_SERIES_ID` to override the PMI/ISM series id if `NAPM` is unavailable.
 
 ### Data sources
 
@@ -93,6 +96,7 @@ This script starts the FastAPI backend and the Vite dev server (requires `npm` o
 - `GET /api/macro/categories`
 - `GET /api/macro/latest`
 - `GET /api/macro/series/{indicator_id}?range=1m|3m|1y|5y|max`
+- `GET /api/macro/series?indicator=<id>&range=1m|3m|1y|5y|max`
 - `POST /api/macro/refresh`
 - `GET /api/signals`
 - `GET /api/health`

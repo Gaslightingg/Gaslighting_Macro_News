@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import logging
 from datetime import datetime
@@ -22,41 +23,47 @@ class RealMarketDataProvider(MarketDataProvider):
         self.store = MarketDataStore(self.settings.resolved_database_path())
         self.timeout = self.settings.request_timeout
 
-    def get_prices(self) -> PricesResponse:
+    async def get_prices(self) -> PricesResponse:
         price_rows: list[dict[str, Any]] = []
         as_of = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        for config in _PRICE_SOURCES:
-            symbol = config["symbol"]
-            label = config["label"]
-            source = None
-            data = _fetch_stooq_price(symbol, self.timeout)
-            if data:
-                price, change_pct, updated = data
-                source = "stooq"
-            else:
-                data = _fetch_yfinance_price(config["yfinance"], self.timeout)
+        async with _build_async_client(self.timeout) as client:
+            semaphore = asyncio.Semaphore(6)
+
+            async def fetch_for_config(config: dict[str, str]) -> None:
+                nonlocal as_of
+                label = config["label"]
+                symbol = config["symbol"]
+                source = None
+                data = await _fetch_stooq_price(client, symbol, self.timeout, semaphore)
                 if data:
                     price, change_pct, updated = data
-                    source = "yfinance"
+                    source = "stooq"
                 else:
-                    cached = _get_cached_price(self.store, label)
-                    if cached:
-                        price, change_pct, updated, source = cached
+                    data = await _fetch_yfinance_price(config["yfinance"], self.timeout)
+                    if data:
+                        price, change_pct, updated = data
+                        source = "yfinance"
                     else:
-                        logger.warning("No price data for %s", label)
-                        continue
+                        cached = _get_cached_price(self.store, label)
+                        if cached:
+                            price, change_pct, updated, source = cached
+                        else:
+                            logger.warning("No price data for %s", label)
+                            return
 
-            as_of = max(as_of, updated)
-            price_rows.append(
-                {
-                    "symbol": label,
-                    "price": price,
-                    "change_pct": change_pct,
-                    "as_of": updated,
-                    "source": source,
-                }
-            )
+                as_of = max(as_of, updated)
+                price_rows.append(
+                    {
+                        "symbol": label,
+                        "price": price,
+                        "change_pct": change_pct,
+                        "as_of": updated,
+                        "source": source,
+                    }
+                )
+
+            await asyncio.gather(*[fetch_for_config(config) for config in _PRICE_SOURCES])
 
         if price_rows:
             self.store.upsert_prices(price_rows)
@@ -74,63 +81,73 @@ class RealMarketDataProvider(MarketDataProvider):
             ],
         )
 
-    def get_macro(self) -> MacroResponse:
+    async def get_macro(self) -> MacroResponse:
         macro_rows: list[dict[str, str]] = []
         as_of = datetime.utcnow().strftime("%Y-%m-%d")
 
-        for config in _MACRO_SOURCES:
-            name = config["name"]
-            value = None
-            change = None
-            updated = None
-            source = None
+        async with _build_async_client(self.timeout) as client:
+            semaphore = asyncio.Semaphore(6)
 
-            if config.get("bea") and self.settings.bea_api_key:
-                bea_result = _fetch_bea_series(
-                    api_key=self.settings.bea_api_key,
-                    dataset=config["bea"]["dataset"],
-                    table_name=config["bea"]["table"],
-                    line_number=config["bea"]["line"],
-                    frequency=config["bea"]["frequency"],
-                    timeout=self.timeout,
-                )
-                if bea_result:
-                    value, change, updated = bea_result
-                    source = "bea"
+            async def fetch_indicator(config: dict[str, Any]) -> None:
+                nonlocal as_of
+                name = config["name"]
+                value = None
+                change = None
+                updated = None
+                source = None
 
-            if value is None and config.get("fred"):
-                if not self.settings.fred_api_key:
-                    logger.info("FRED API key not set; skipping %s", name)
-                else:
-                    fred_result = _fetch_fred_series(
-                        api_key=self.settings.fred_api_key,
-                        series_id=config["fred"],
+                if config.get("bea") and self.settings.bea_api_key:
+                    bea_result = await _fetch_bea_series(
+                        client=client,
+                        api_key=self.settings.bea_api_key,
+                        dataset=config["bea"]["dataset"],
+                        table_name=config["bea"]["table"],
+                        line_number=config["bea"]["line"],
+                        frequency=config["bea"]["frequency"],
                         timeout=self.timeout,
-                        unit=config.get("unit"),
+                        semaphore=semaphore,
                     )
-                    if fred_result:
-                        value, change, updated = fred_result
-                        source = "fred"
+                    if bea_result:
+                        value, change, updated = bea_result
+                        source = "bea"
 
-            if value is None:
-                cached = _get_cached_macro(self.store, name)
-                if cached:
-                    value, change, updated, source = cached
-                else:
-                    logger.warning("No macro data for %s", name)
-                    continue
+                if value is None and config.get("fred"):
+                    if not self.settings.fred_api_key:
+                        logger.info("FRED API key not set; skipping %s", name)
+                    else:
+                        fred_result = await _fetch_fred_series(
+                            client=client,
+                            api_key=self.settings.fred_api_key,
+                            series_id=config["fred"],
+                            timeout=self.timeout,
+                            unit=config.get("unit"),
+                            semaphore=semaphore,
+                        )
+                        if fred_result:
+                            value, change, updated = fred_result
+                            source = "fred"
 
-            as_of = max(as_of, updated)
-            macro_rows.append(
-                {
-                    "name": name,
-                    "value": value,
-                    "change": change,
-                    "updated": updated,
-                    "as_of": as_of,
-                    "source": source,
-                }
-            )
+                if value is None:
+                    cached = _get_cached_macro(self.store, name)
+                    if cached:
+                        value, change, updated, source = cached
+                    else:
+                        logger.warning("No macro data for %s", name)
+                        return
+
+                as_of = max(as_of, updated)
+                macro_rows.append(
+                    {
+                        "name": name,
+                        "value": value,
+                        "change": change,
+                        "updated": updated,
+                        "as_of": as_of,
+                        "source": source,
+                    }
+                )
+
+            await asyncio.gather(*[fetch_indicator(config) for config in _MACRO_SOURCES])
 
         if macro_rows:
             self.store.upsert_macro(macro_rows)
@@ -151,14 +168,17 @@ class RealMarketDataProvider(MarketDataProvider):
         )
 
 
-def _fetch_stooq_price(symbol: str, timeout: float) -> tuple[float, float, str] | None:
+async def _fetch_stooq_price(
+    client: httpx.AsyncClient,
+    symbol: str,
+    timeout: float,
+    semaphore: asyncio.Semaphore,
+) -> tuple[float, float, str] | None:
     url = "https://stooq.com/q/d/l/"
     params = {"s": symbol, "i": "d"}
-    try:
-        response = httpx.get(url, params=params, timeout=timeout)
-        response.raise_for_status()
-    except httpx.HTTPError as exc:
-        logger.info("Stooq request failed for %s: %s", symbol, exc)
+    async with semaphore:
+        response = await _request_with_retries(client, url, params, timeout)
+    if response is None:
         return None
 
     reader = csv.DictReader(StringIO(response.text))
@@ -178,34 +198,42 @@ def _fetch_stooq_price(symbol: str, timeout: float) -> tuple[float, float, str] 
     return latest_close, round(change_pct, 2), latest["Date"]
 
 
-def _fetch_yfinance_price(symbol: str, timeout: float) -> tuple[float, float, str] | None:
+async def _fetch_yfinance_price(symbol: str, timeout: float) -> tuple[float, float, str] | None:
     try:
         import yfinance as yf
     except ImportError:
         logger.info("yfinance not installed; skipping %s", symbol)
         return None
 
-    try:
-        ticker = yf.Ticker(symbol)
-        history = ticker.history(period="5d", interval="1d", timeout=timeout)
-    except Exception as exc:
-        logger.info("yfinance failed for %s: %s", symbol, exc)
-        return None
+    def _run() -> tuple[float, float, str] | None:
+        try:
+            ticker = yf.Ticker(symbol)
+            history = ticker.history(period="5d", interval="1d", timeout=timeout)
+        except Exception as exc:
+            logger.info("yfinance failed for %s: %s", symbol, exc)
+            return None
 
-    if history.empty or len(history) < 2:
-        return None
+        if history.empty or len(history) < 2:
+            return None
 
-    latest = history.iloc[-1]
-    previous = history.iloc[-2]
-    latest_close = float(latest["Close"])
-    previous_close = float(previous["Close"])
-    change_pct = ((latest_close - previous_close) / previous_close) * 100
-    updated = latest.name.strftime("%Y-%m-%d")
-    return latest_close, round(change_pct, 2), updated
+        latest = history.iloc[-1]
+        previous = history.iloc[-2]
+        latest_close = float(latest["Close"])
+        previous_close = float(previous["Close"])
+        change_pct = ((latest_close - previous_close) / previous_close) * 100
+        updated = latest.name.strftime("%Y-%m-%d")
+        return latest_close, round(change_pct, 2), updated
+
+    return await asyncio.to_thread(_run)
 
 
-def _fetch_fred_series(
-    api_key: str, series_id: str, timeout: float, unit: str | None = None
+async def _fetch_fred_series(
+    client: httpx.AsyncClient,
+    api_key: str,
+    series_id: str,
+    timeout: float,
+    unit: str | None = None,
+    semaphore: asyncio.Semaphore | None = None,
 ) -> tuple[str, str, str] | None:
     url = "https://api.stlouisfed.org/fred/series/observations"
     params = {
@@ -215,11 +243,9 @@ def _fetch_fred_series(
         "sort_order": "desc",
         "limit": 2,
     }
-    try:
-        response = httpx.get(url, params=params, timeout=timeout)
-        response.raise_for_status()
-    except httpx.HTTPError as exc:
-        logger.info("FRED request failed for %s: %s", series_id, exc)
+    async with (semaphore or asyncio.Semaphore(1)):
+        response = await _request_with_retries(client, url, params, timeout)
+    if response is None:
         return None
 
     payload = response.json()
@@ -241,13 +267,15 @@ def _fetch_fred_series(
     return formatted_value, formatted_change, latest["date"]
 
 
-def _fetch_bea_series(
+async def _fetch_bea_series(
+    client: httpx.AsyncClient,
     api_key: str,
     dataset: str,
     table_name: str,
     line_number: str,
     frequency: str,
     timeout: float,
+    semaphore: asyncio.Semaphore,
 ) -> tuple[str, str, str] | None:
     url = "https://apps.bea.gov/api/data"
     params = {
@@ -259,11 +287,9 @@ def _fetch_bea_series(
         "Frequency": frequency,
         "ResultFormat": "JSON",
     }
-    try:
-        response = httpx.get(url, params=params, timeout=timeout)
-        response.raise_for_status()
-    except httpx.HTTPError as exc:
-        logger.info("BEA request failed: %s", exc)
+    async with semaphore:
+        response = await _request_with_retries(client, url, params, timeout)
+    if response is None:
         return None
 
     payload = response.json()
@@ -331,6 +357,34 @@ def _get_cached_macro(
         if row["name"] == name:
             return row["value"], row["change"], row["updated"], row["source"]
     return None
+
+
+def _build_async_client(timeout: float) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(timeout, connect=timeout),
+        limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+    )
+
+
+async def _request_with_retries(
+    client: httpx.AsyncClient,
+    url: str,
+    params: dict[str, Any],
+    timeout: float,
+    retries: int = 2,
+) -> httpx.Response | None:
+    attempt = 0
+    while True:
+        try:
+            response = await client.get(url, params=params, timeout=timeout)
+            response.raise_for_status()
+            return response
+        except httpx.HTTPError as exc:
+            attempt += 1
+            if attempt > retries:
+                logger.info("Request failed for %s: %s", url, exc)
+                return None
+            await asyncio.sleep(0.2 * attempt)
 
 
 _PRICE_SOURCES: Iterable[dict[str, str]] = (

@@ -14,12 +14,19 @@ class Settings(BaseSettings):
     market_data_provider: str = Field(default="auto", validation_alias="MARKET_DATA_PROVIDER")
     fred_api_key: Optional[str] = None
     bea_api_key: Optional[str] = None
+    fred_pmi_series_id: str = Field(default="NAPM", validation_alias="FRED_PMI_SERIES_ID")
     database_path: str = Field(
         default="backend/data/market_data.sqlite3",
         validation_alias="MARKET_DATA_DB_PATH",
     )
     request_timeout: float = Field(default=10.0, validation_alias="REQUEST_TIMEOUT")
     cors_origins: str = Field(default="*", validation_alias="BACKEND_CORS_ORIGINS")
+    cache_db_url: str = Field(default="sqlite:///./cache.db", validation_alias="CACHE_DB_URL")
+    cache_ttl_latest: int = Field(default=1800, validation_alias="CACHE_TTL_LATEST")
+    cache_ttl_series_1y: int = Field(default=21600, validation_alias="CACHE_TTL_SERIES_1Y")
+    cache_ttl_series_5y: int = Field(default=43200, validation_alias="CACHE_TTL_SERIES_5Y")
+    cache_ttl_prices: int = Field(default=180, validation_alias="CACHE_TTL_PRICES")
+    cache_ttl_signals: int = Field(default=600, validation_alias="CACHE_TTL_SIGNALS")
 
     def resolved_database_path(self) -> Path:
         path = Path(self.database_path)
