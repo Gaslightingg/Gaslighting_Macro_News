@@ -19,6 +19,8 @@ const REFRESH_INTERVAL_MS = 60 * 60 * 1000;
 const HISTORY_LIMIT = 48;
 
 const HISTORY_STORAGE_KEY = "gm_history_v1";
+const DEFAULT_RANGE = "1y";
+const RANGE_OPTIONS = ["1m", "3m", "1y", "5y", "max"];
 
 const formatChange = (value) => `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;
 const formatPrice = (value) => (value < 10 ? value.toFixed(4) : value.toFixed(2));
@@ -90,9 +92,104 @@ const fetchJson = async (url) => {
   }
 };
 
+const ChartModal = ({ indicator, onClose }) => {
+  const [range, setRange] = useState(DEFAULT_RANGE);
+  const [seriesData, setSeriesData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!indicator) return;
+    const loadSeries = async () => {
+      try {
+        setLoading(true);
+        const data = await fetchJson(
+          `${API_BASE}/api/macro/series/${indicator.id}?range=${range}`,
+        );
+        setSeriesData(data);
+        setError(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to load series.");
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadSeries();
+  }, [indicator, range]);
+
+  if (!indicator) return null;
+
+  const tableRows = seriesData?.series?.slice(-50).reverse() ?? [];
+  const chartValues = seriesData?.series ?? [];
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <h3>{indicator.name}</h3>
+            <p className="modal-subtitle">
+              {seriesData?.source ?? indicator.source} · {seriesData?.units ?? indicator.units}
+              {" · "}
+              {seriesData?.frequency ?? indicator.frequency}
+            </p>
+          </div>
+          <button type="button" className="modal-close" onClick={onClose}>
+            ✕
+          </button>
+        </div>
+        <div className="modal-controls">
+          {RANGE_OPTIONS.map((option) => (
+            <button
+              key={option}
+              type="button"
+              className={`range-btn ${range === option ? "active" : ""}`}
+              onClick={() => setRange(option)}
+            >
+              {option.toUpperCase()}
+            </button>
+          ))}
+        </div>
+        <div className="modal-chart">
+          {loading && <p>Loading chart...</p>}
+          {error && <p className="error-banner">{error}</p>}
+          {!loading && !error && (
+            <svg viewBox="0 0 600 220" width="100%" height="220">
+              <path
+                d={buildSparklinePath(
+                  chartValues.map((point) => point.value),
+                  600,
+                  200,
+                )}
+                fill="none"
+                stroke="var(--accent)"
+                strokeWidth="2"
+              />
+            </svg>
+          )}
+        </div>
+        <div className="modal-table">
+          <div className="modal-table-header">
+            <span>Date</span>
+            <span>Value</span>
+          </div>
+          {tableRows.map((point) => (
+            <div key={point.date} className="modal-table-row">
+              <span>{point.date}</span>
+              <span>{point.value.toFixed(2)}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 function App() {
   const [prices, setPrices] = useState(null);
   const [macro, setMacro] = useState(null);
+  const [macroCategories, setMacroCategories] = useState([]);
+  const [macroLatest, setMacroLatest] = useState([]);
   const [signals, setSignals] = useState(null);
   const [error, setError] = useState(null);
   const [history, setHistory] = useState(() => {
@@ -105,24 +202,7 @@ function App() {
     () => localStorage.getItem("gm_theme") ?? "dark",
   );
 
-  const macroNotes = useMemo(
-    () => ({
-      CPI: "Tracks consumer inflation trends.",
-      "Core CPI": "Inflation excluding food/energy noise.",
-      PCE: "Fed-preferred inflation gauge.",
-      "PMI/ISM": "Business activity and demand momentum.",
-      NFP: "Monthly payroll growth signal.",
-      "Unemployment Rate": "Labor slack and cycle health.",
-      "Jobless Claims": "High-frequency layoffs pulse.",
-      "Fed Funds Rate": "Policy stance for risk appetite.",
-      US10Y: "Benchmark long-term yield level.",
-      US2Y: "Policy expectations & curve shape.",
-      US30Y: "Long duration sentiment.",
-      VIX: "Risk-off volatility barometer.",
-      DXY: "Dollar strength vs major currencies.",
-    }),
-    [],
-  );
+  const [selectedIndicator, setSelectedIndicator] = useState(null);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -133,14 +213,19 @@ function App() {
     const load = async () => {
       try {
         console.info(`[api] base url set to ${API_BASE}`);
-        const [pricesRes, macroRes, signalsRes] = await Promise.all([
+        const [pricesRes, macroRes, signalsRes, categoriesRes, latestRes] =
+          await Promise.all([
           fetchJson(`${API_BASE}/api/prices`),
           fetchJson(`${API_BASE}/api/macro`),
           fetchJson(`${API_BASE}/api/signals`),
+          fetchJson(`${API_BASE}/api/macro/categories`),
+          fetchJson(`${API_BASE}/api/macro/latest`),
         ]);
         setPrices(pricesRes);
         setMacro(macroRes);
         setSignals(signalsRes);
+        setMacroCategories(categoriesRes.categories ?? []);
+        setMacroLatest(latestRes.latest ?? []);
         setLastFetch(new Date());
         setError(null);
         setHistory((prev) => {
@@ -192,6 +277,14 @@ function App() {
     const next = new Date(lastFetch.getTime() + REFRESH_INTERVAL_MS);
     return formatTime(next);
   }, [lastFetch]);
+
+  const latestById = useMemo(() => {
+    const map = new Map();
+    macroLatest.forEach((item) => {
+      map.set(item.indicator_id, item);
+    });
+    return map;
+  }, [macroLatest]);
 
   return (
     <div className="app">
@@ -253,37 +346,55 @@ function App() {
             Updated: {macro?.as_of ?? "Loading..."}
           </span>
         </div>
-        <div className="table card">
-          <div className="table-header">
-            <span>Indicator</span>
-            <span>Value</span>
-            <span>Change</span>
-            <span>Last updated</span>
-            <span>Why it matters</span>
-            <span>Trend</span>
-          </div>
-          {macro?.series?.map((item) => (
-            <div key={item.name} className="table-row">
-              <span className="table-title">{item.name}</span>
-              <span>{item.value}</span>
-              <span
-                className={`table-change ${
-                  item.change?.startsWith("-") ? "negative" : "positive"
-                }`}
-              >
-                {item.change}
-              </span>
-              <span className="table-date">{item.updated}</span>
-              <span className="table-note">
-                {macroNotes[item.name] ?? "Macro context signal."}
-              </span>
-              <Sparkline
-                values={history.macro?.[item.name]}
-                className={item.change?.startsWith("-") ? "negative" : "positive"}
-              />
+        {macroCategories.map((category) => (
+          <div key={category.id} className="category-block">
+            <div className="category-header">
+              <h3>{category.name}</h3>
             </div>
-          ))}
-        </div>
+            <div className="table card">
+              <div className="table-header">
+                <span>Indicator</span>
+                <span>Value</span>
+                <span>Change</span>
+                <span>Last updated</span>
+                <span>Why it matters</span>
+                <span>Trend</span>
+                <span></span>
+              </div>
+              {category.indicators.map((indicator) => {
+                const latest = latestById.get(indicator.id);
+                return (
+                  <div key={indicator.id} className="table-row">
+                    <span className="table-title">{indicator.name}</span>
+                    <span>{latest?.value ?? "—"}</span>
+                    <span
+                      className={`table-change ${
+                        latest?.change?.startsWith("-") ? "negative" : "positive"
+                      }`}
+                    >
+                      {latest?.change ?? "—"}
+                    </span>
+                    <span className="table-date">{latest?.updated ?? "—"}</span>
+                    <span className="table-note">{indicator.why_it_matters}</span>
+                    <Sparkline
+                      values={history.macro?.[indicator.name]}
+                      className={
+                        latest?.change?.startsWith("-") ? "negative" : "positive"
+                      }
+                    />
+                    <button
+                      type="button"
+                      className="chart-btn"
+                      onClick={() => setSelectedIndicator(indicator)}
+                    >
+                      Chart
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
         <p className="commentary">{macro?.commentary ?? "Loading..."}</p>
       </section>
 
@@ -316,6 +427,12 @@ function App() {
         </div>
         <p className="disclaimer">{signals?.disclaimer ?? "Not financial advice"}</p>
       </section>
+      {selectedIndicator && (
+        <ChartModal
+          indicator={selectedIndicator}
+          onClose={() => setSelectedIndicator(null)}
+        />
+      )}
     </div>
   );
 }

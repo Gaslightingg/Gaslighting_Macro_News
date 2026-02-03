@@ -29,6 +29,57 @@ class MacroResponse(BaseModel):
     commentary: str
 
 
+class MacroIndicatorMeta(BaseModel):
+    id: str
+    name: str
+    category: str
+    frequency: str
+    units: str
+    source: str
+    why_it_matters: str
+    asset_impact: str
+    direction_hint: str
+
+
+class MacroCategory(BaseModel):
+    id: str
+    name: str
+    indicators: List[MacroIndicatorMeta]
+
+
+class MacroCategoriesResponse(BaseModel):
+    categories: List[MacroCategory]
+
+
+class MacroLatestItem(BaseModel):
+    indicator_id: str
+    name: str
+    value: str
+    change: str
+    updated: str
+    category: str
+
+
+class MacroLatestResponse(BaseModel):
+    as_of: str
+    latest: List[MacroLatestItem]
+
+
+class MacroSeriesPoint(BaseModel):
+    date: str
+    value: float
+
+
+class MacroSeriesResponse(BaseModel):
+    indicator_id: str
+    latest: str
+    last_updated: str
+    units: str
+    frequency: str
+    source: str
+    series: List[MacroSeriesPoint]
+
+
 class SignalItem(BaseModel):
     ticker: str
     direction: str

@@ -278,7 +278,7 @@ body {
 .table-header,
 .table-row {
   display: grid;
-  grid-template-columns: 1.4fr 0.8fr 0.8fr 1fr 1.4fr 0.8fr;
+  grid-template-columns: 1.4fr 0.8fr 0.8fr 1fr 1.4fr 0.8fr 0.6fr;
   gap: 12px;
   align-items: center;
 }
@@ -298,6 +298,126 @@ body {
   padding: 12px 0;
   border-top: 1px solid var(--border);
   font-size: 14px;
+}
+
+.category-block {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.category-header h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  color: var(--text);
+}
+
+.chart-btn {
+  background: var(--surface-light);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chart-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 50;
+}
+
+.modal {
+  width: min(900px, 95vw);
+  max-height: 90vh;
+  overflow: auto;
+  background: var(--surface-strong);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 20px 24px;
+  box-shadow: var(--shadow);
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.modal-subtitle {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.modal-close {
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 1.2rem;
+  cursor: pointer;
+}
+
+.modal-controls {
+  display: flex;
+  gap: 8px;
+  margin: 16px 0;
+  flex-wrap: wrap;
+}
+
+.range-btn {
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-light);
+  color: var(--text);
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.range-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.modal-chart {
+  background: var(--surface);
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  padding: 12px;
+}
+
+.modal-table {
+  margin-top: 16px;
+  display: grid;
+  gap: 8px;
+}
+
+.modal-table-header,
+.modal-table-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  font-size: 0.85rem;
+}
+
+.modal-table-header {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
 }
 
 .table-title {
