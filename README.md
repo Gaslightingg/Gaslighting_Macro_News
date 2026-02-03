@@ -7,6 +7,7 @@ A lightweight dashboard with a FastAPI backend and a Vite + React frontend.
 - `backend/` — FastAPI service with modular structure:
   - `app/api` — API routes.
   - `app/models` — Pydantic response models.
+  - `app/providers` — Data provider abstractions (mock + future real sources).
   - `app/services` — Mock data providers and signal builders.
   - `app/utils` — Logging utilities.
 - `frontend/` — Vite + React dashboard UI.
