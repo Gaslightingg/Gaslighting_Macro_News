@@ -4,6 +4,7 @@ import "./App.css";
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 
 const formatChange = (value) => `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;
+const formatPrice = (value) => (value < 10 ? value.toFixed(4) : value.toFixed(2));
 
 function App() {
   const [prices, setPrices] = useState(null);
@@ -45,7 +46,7 @@ function App() {
             <article key={ticker.symbol} className="card">
               <div className="card-row">
                 <span className="symbol">{ticker.symbol}</span>
-                <span className="price">{ticker.price.toFixed(2)}</span>
+                <span className="price">{formatPrice(ticker.price)}</span>
               </div>
               <div
                 className={`change ${

@@ -57,3 +57,5 @@ npm install
 - `GET /api/prices`
 - `GET /api/macro`
 - `GET /api/signals`
+
+`/api/prices` returns mock tickers for S&P500, NAS100, EUR/USD, GBP/USD, GBP/JPY, and XAUUSD.
