@@ -1,11 +1,19 @@
 import { useEffect, useState } from "react";
 import "./App.css";
 
-const DEFAULT_API_BASE = `http://${window.location.hostname}:8000`;
-const API_BASE = (import.meta.env.VITE_API_URL || DEFAULT_API_BASE).replace(
-  /\/$/,
-  "",
-);
+const resolveApiBase = () => {
+  const envBase = import.meta.env.VITE_API_URL;
+  if (envBase) {
+    return envBase.replace(/\/$/, "");
+  }
+  const hostname =
+    window.location.hostname === "0.0.0.0"
+      ? "localhost"
+      : window.location.hostname;
+  return `http://${hostname}:8000`;
+};
+
+const API_BASE = resolveApiBase();
 const REQUEST_TIMEOUT = 8000;
 
 const formatChange = (value) => `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;

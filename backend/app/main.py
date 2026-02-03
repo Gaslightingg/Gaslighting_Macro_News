@@ -26,6 +26,15 @@ app.add_middleware(
 )
 
 
+@app.get("/")
+async def root() -> dict[str, str]:
+    return {
+        "status": "ok",
+        "message": "Gaslighting Macro News API is running.",
+        "health": "/api/health",
+    }
+
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start_time = perf_counter()

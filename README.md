@@ -57,7 +57,7 @@ pip install -r requirements.txt
    - **Parameters**: `app.main:app --reload --host 0.0.0.0 --port 8000`
    - **Working directory**: `<repo>/backend`
 
-5. Run the configuration and confirm the API responds at `http://localhost:8000/api/health`.
+5. Run the configuration and confirm the API responds at `http://localhost:8000/api/health` (use `localhost`, not `0.0.0.0`, in your browser).
 
 ## Run the frontend (PyCharm)
 
