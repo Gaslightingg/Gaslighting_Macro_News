@@ -22,7 +22,7 @@ cp .env.example .env
 
 Key variables for real data mode:
 
-- `MARKET_DATA_PROVIDER=real` to enable live data fetching.
+- `MARKET_DATA_PROVIDER=real` (or `auto`) to enable live data fetching.
 - `FRED_API_KEY` and `BEA_API_KEY` for macro data.
 - `MARKET_DATA_DB_PATH` for the local SQLite cache.
 - `BACKEND_CORS_ORIGINS` (comma-separated) to allow frontend origins (default `*`).
@@ -37,7 +37,7 @@ The real provider pulls market data from:
 - **FRED** for most macro series (CPI, labor, rates, VIX, DXY).
 - **BEA** for PCE (falls back to FRED when BEA is unavailable).
 
-All fetched values are cached in a local SQLite database so the dashboard can still render if a source is unavailable.
+All fetched values are cached in a local SQLite database so the dashboard can still render if a source is unavailable. Every hourly fetch appends to `price_history` and `macro_history` for historical lookbacks; future data is not available from these sources and cannot be stored ahead of time.
 
 ## Run the backend (PyCharm)
 

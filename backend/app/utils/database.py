@@ -41,6 +41,31 @@ class MarketDataStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS price_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    price REAL NOT NULL,
+                    change_pct REAL NOT NULL,
+                    as_of TEXT NOT NULL,
+                    source TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS macro_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    change TEXT NOT NULL,
+                    updated TEXT NOT NULL,
+                    as_of TEXT NOT NULL,
+                    source TEXT NOT NULL
+                )
+                """
+            )
 
     def upsert_prices(self, rows: Iterable[dict]) -> None:
         with self._connect() as conn:
@@ -57,6 +82,16 @@ class MarketDataStore:
                 list(rows),
             )
 
+    def insert_price_history(self, rows: Iterable[dict]) -> None:
+        with self._connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO price_history (symbol, price, change_pct, as_of, source)
+                VALUES (:symbol, :price, :change_pct, :as_of, :source)
+                """,
+                list(rows),
+            )
+
     def upsert_macro(self, rows: Iterable[dict]) -> None:
         with self._connect() as conn:
             conn.executemany(
@@ -69,6 +104,16 @@ class MarketDataStore:
                     updated=excluded.updated,
                     as_of=excluded.as_of,
                     source=excluded.source
+                """,
+                list(rows),
+            )
+
+    def insert_macro_history(self, rows: Iterable[dict]) -> None:
+        with self._connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO macro_history (name, value, change, updated, as_of, source)
+                VALUES (:name, :value, :change, :updated, :as_of, :source)
                 """,
                 list(rows),
             )

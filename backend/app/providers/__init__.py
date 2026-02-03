@@ -6,7 +6,7 @@ from ..utils.settings import get_settings
 
 def get_provider() -> MarketDataProvider:
     settings = get_settings()
-    if settings.market_data_provider.lower() == "real":
+    if settings.market_data_provider.lower() in {"real", "auto"}:
         return RealMarketDataProvider(settings=settings)
     return MockMarketDataProvider()
 

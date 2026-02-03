@@ -11,7 +11,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
-    market_data_provider: str = Field(default="mock", validation_alias="MARKET_DATA_PROVIDER")
+    market_data_provider: str = Field(default="auto", validation_alias="MARKET_DATA_PROVIDER")
     fred_api_key: Optional[str] = None
     bea_api_key: Optional[str] = None
     database_path: str = Field(

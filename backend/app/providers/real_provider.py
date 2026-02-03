@@ -60,6 +60,7 @@ class RealMarketDataProvider(MarketDataProvider):
 
         if price_rows:
             self.store.upsert_prices(price_rows)
+            self.store.insert_price_history(price_rows)
 
         return PricesResponse(
             as_of=as_of,
@@ -133,6 +134,7 @@ class RealMarketDataProvider(MarketDataProvider):
 
         if macro_rows:
             self.store.upsert_macro(macro_rows)
+            self.store.insert_macro_history(macro_rows)
 
         return MacroResponse(
             as_of=as_of,
