@@ -278,7 +278,7 @@ body {
 .table-header,
 .table-row {
   display: grid;
-  grid-template-columns: 1.4fr 0.8fr 0.8fr 1fr 1.4fr 0.8fr 0.6fr;
+  grid-template-columns: 1.4fr 0.8fr 0.8fr 1fr 1.4fr 0.8fr 0.6fr 0.6fr 0.6fr;
   gap: 12px;
   align-items: center;
 }
@@ -326,6 +326,73 @@ body {
 .chart-btn:hover {
   color: var(--accent);
   border-color: var(--accent);
+}
+
+.chart-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.status-badge {
+  font-size: 0.75rem;
+  text-transform: capitalize;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-light);
+}
+
+.status-badge.live {
+  color: var(--positive);
+  border-color: rgba(63, 227, 157, 0.4);
+}
+
+.status-badge.cached {
+  color: var(--accent);
+}
+
+.status-badge.stale {
+  color: #f2c94c;
+}
+
+.status-badge.unavailable {
+  color: var(--text-muted);
+}
+
+.quality-badge {
+  font-size: 0.75rem;
+  text-transform: capitalize;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-light);
+}
+
+.quality-badge.high {
+  color: var(--positive);
+}
+
+.quality-badge.medium {
+  color: #f2c94c;
+}
+
+.quality-badge.low {
+  color: var(--negative);
+}
+
+.debug-toggle {
+  margin-top: 12px;
+}
+
+.debug-panel {
+  background: var(--surface-light);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  max-height: 200px;
+  overflow: auto;
 }
 
 .modal-backdrop {

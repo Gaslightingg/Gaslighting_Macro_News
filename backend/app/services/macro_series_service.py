@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
-from typing import Any
 
 from ..models.schemas import (
     MacroCategoriesResponse,
@@ -14,14 +13,13 @@ from ..models.schemas import (
     MacroSeriesResponse,
 )
 from ..providers.fred_provider import FredClient, parse_fred_points
-from ..utils.cache_db import CacheStore
+from ..utils.cache_db import CacheStore, IndicatorLatest
 from ..utils.settings import get_settings
 from .macro_catalog import ALL_CATEGORIES, MacroIndicator, all_indicators, find_indicator
 
 SERIES_RANGE_LIMITS = {
-    "1m": 35,
-    "3m": 100,
     "1y": 380,
+    "2y": 800,
     "5y": 2000,
     "max": 5000,
 }
@@ -37,15 +35,15 @@ def _latest_cache_key() -> str:
     return "macro:latest"
 
 
-def _mock_series(indicator: MacroIndicator, points: int) -> list[tuple[str, float]]:
-    today = datetime.utcnow().date()
-    series = []
-    base = 100.0
-    for i in range(points):
-        date = today - timedelta(days=points - i)
-        value = base + (i * 0.1)
-        series.append((date.isoformat(), value))
-    return series
+def _stale_after_seconds(frequency: str) -> int:
+    mapping = {
+        "daily": 6 * 3600,
+        "weekly": 12 * 3600,
+        "monthly": 24 * 3600,
+        "quarterly": 24 * 3600,
+        "irregular": 24 * 3600,
+    }
+    return mapping.get(frequency, 6 * 3600)
 
 
 def get_categories_payload() -> MacroCategoriesResponse:
@@ -75,14 +73,14 @@ async def _fetch_series(
     limit = SERIES_RANGE_LIMITS.get(range_key, SERIES_RANGE_LIMITS["1y"])
     settings = get_settings()
     if not indicator.fred_series:
-        return _mock_series(indicator, min(limit, 120)), "No data source configured"
+        return [], "No data source configured"
 
     fred_series_id = indicator.fred_series
     if indicator.id == "pmi":
         fred_series_id = settings.fred_pmi_series_id
 
     if not settings.fred_api_key:
-        return _mock_series(indicator, min(limit, 120)), "FRED API key not configured"
+        return [], "FRED API key not configured"
 
     async with semaphore:
         observations = await client.get_series_observations(fred_series_id, limit=limit)
@@ -90,7 +88,7 @@ async def _fetch_series(
     points = parse_fred_points(observations)
     if points:
         return list(reversed(points)), None
-    return _mock_series(indicator, min(limit, 120)), f"No data returned for {fred_series_id}"
+    return [], f"No data returned for {fred_series_id}"
 
 
 async def get_series_payload(indicator_id: str, range_key: str) -> MacroSeriesResponse:
@@ -110,25 +108,58 @@ async def get_series_payload(indicator_id: str, range_key: str) -> MacroSeriesRe
 
     client = FredClient(settings.fred_api_key or "", timeout=settings.request_timeout)
     semaphore = asyncio.Semaphore(6)
+    cached_series = cache.get_series(indicator_id)
+    if cached_series:
+        last_fetch = max(row.fetched_at for row in cached_series)
+        if (datetime.utcnow() - last_fetch).total_seconds() < _stale_after_seconds(
+            indicator.frequency
+        ):
+            return MacroSeriesResponse(
+                indicator_id=indicator_id,
+                name=indicator.name,
+                category=indicator.category,
+                unit=indicator.units,
+                last_updated=cached_series[-1].date,
+                status="cached",
+                source=indicator.source,
+                expected_frequency=indicator.frequency,
+                stale_after_seconds=_stale_after_seconds(indicator.frequency),
+                quality="high" if indicator.source == "FRED" else "medium",
+                points=[
+                    MacroSeriesPoint(date=row.date, value=row.value)
+                    for row in cached_series
+                    if row.value is not None
+                ],
+                history_points=len(cached_series),
+                error=None,
+            )
+
     points, error = await _fetch_series(indicator, range_key, client, semaphore)
     await client.close()
 
-    latest_value = points[-1][1] if points else 0.0
-    last_updated = points[-1][0] if points else datetime.utcnow().date().isoformat()
+    if points:
+        cache.set_series_points(indicator_id, points)
 
+    last_updated = points[-1][0] if points else None
     response = MacroSeriesResponse(
         indicator_id=indicator_id,
-        latest=f"{latest_value:.2f}",
+        name=indicator.name,
+        category=indicator.category,
+        unit=indicator.units,
         last_updated=last_updated,
-        units=indicator.units,
-        frequency=indicator.frequency,
-        source=indicator.source,
-        series=[MacroSeriesPoint(date=date, value=value) for date, value in points],
-        available=error is None,
+        status="live" if points else "unavailable",
+        source=indicator.source if points else None,
+        expected_frequency=indicator.frequency,
+        stale_after_seconds=_stale_after_seconds(indicator.frequency),
+        quality="high" if indicator.source == "FRED" else "low",
+        points=[MacroSeriesPoint(date=date, value=value) for date, value in points],
+        history_points=len(points),
         error=error,
     )
 
-    ttl_seconds = settings.cache_ttl_series_1y if range_key == "1y" else settings.cache_ttl_series_5y
+    ttl_seconds = (
+        settings.cache_ttl_series_1y if range_key in {"1y", "2y"} else settings.cache_ttl_series_5y
+    )
     cache.set_cache(cache_key, response.model_dump(), ttl_seconds)
     return response
 
@@ -147,38 +178,70 @@ async def get_latest_payload() -> MacroLatestResponse:
 
     async def build_latest(indicator: MacroIndicator) -> None:
         nonlocal as_of
-        points, error = await _fetch_series(indicator, "1y", client, semaphore)
-        if not points:
-            latest_items.append(
-                MacroLatestItem(
-                    indicator_id=indicator.id,
-                    name=indicator.name,
-                    value="—",
-                    change="—",
-                    updated="—",
-                    category=indicator.category,
-                    available=False,
-                    error=error,
+        cached_latest = cache.get_latest(indicator.id)
+        if cached_latest:
+            age_seconds = (datetime.utcnow() - cached_latest.fetched_at).total_seconds()
+            if age_seconds < _stale_after_seconds(indicator.frequency):
+                latest_items.append(
+                    MacroLatestItem(
+                        indicator_id=indicator.id,
+                        name=indicator.name,
+                        value=cached_latest.value,
+                        change=cached_latest.change,
+                        unit=indicator.units,
+                        last_updated=cached_latest.last_updated,
+                        category=indicator.category,
+                        status="cached",
+                        source=cached_latest.source,
+                        history_points=cache.get_series(indicator.id).__len__(),
+                        expected_frequency=indicator.frequency,
+                        stale_after_seconds=_stale_after_seconds(indicator.frequency),
+                        quality=cached_latest.quality or "medium",
+                        error=cached_latest.error,
+                    )
                 )
-            )
-            return
-        latest_value = points[-1][1]
+                return
+
+        points, error = await _fetch_series(indicator, "1y", client, semaphore)
+        latest_value = points[-1][1] if points else None
         change = None
-        if len(points) >= 2:
+        if points and len(points) >= 2:
             change = points[-1][1] - points[-2][1]
         latest_items.append(
             MacroLatestItem(
                 indicator_id=indicator.id,
                 name=indicator.name,
-                value=f"{latest_value:.2f}",
-                change=f"{change:+.2f}" if change is not None else "0.00",
-                updated=points[-1][0],
+                value=latest_value,
+                change=change,
+                unit=indicator.units,
+                last_updated=points[-1][0] if points else None,
                 category=indicator.category,
-                available=error is None,
-                error=error,
+                status="live" if points else "unavailable",
+                source=indicator.source if points else None,
+                history_points=len(points),
+                expected_frequency=indicator.frequency,
+                stale_after_seconds=_stale_after_seconds(indicator.frequency),
+                quality="high" if indicator.source == "FRED" else "low",
+                error=error if not points else None,
             )
         )
-        as_of = max(as_of, points[-1][0])
+        if points:
+            as_of = max(as_of, points[-1][0])
+            cache.set_series_points(indicator.id, points)
+        cache.set_latest(
+            IndicatorLatest(
+                indicator_id=indicator.id,
+                fetched_at=datetime.utcnow(),
+                last_updated=points[-1][0] if points else None,
+                value=latest_value,
+                change=change,
+                status="live" if points else "unavailable",
+                source=indicator.source if points else None,
+                quality="high" if indicator.source == "FRED" else "low",
+                error=error if not points else None,
+                payload_json=None,
+            )
+        )
 
     await asyncio.gather(*[build_latest(ind) for ind in all_indicators()])
     await client.close()

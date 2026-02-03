@@ -54,11 +54,17 @@ class MacroCategoriesResponse(BaseModel):
 class MacroLatestItem(BaseModel):
     indicator_id: str
     name: str
-    value: str
-    change: str
-    updated: str
+    value: float | None
+    change: float | None
+    unit: str | None
+    last_updated: str | None
     category: str
-    available: bool = True
+    status: str
+    source: str | None
+    history_points: int
+    expected_frequency: str
+    stale_after_seconds: int
+    quality: str
     error: str | None = None
 
 
@@ -74,13 +80,17 @@ class MacroSeriesPoint(BaseModel):
 
 class MacroSeriesResponse(BaseModel):
     indicator_id: str
-    latest: str
-    last_updated: str
-    units: str
-    frequency: str
-    source: str
-    series: List[MacroSeriesPoint]
-    available: bool = True
+    name: str
+    category: str
+    unit: str | None
+    last_updated: str | None
+    status: str
+    source: str | None
+    expected_frequency: str
+    stale_after_seconds: int
+    quality: str
+    points: List[MacroSeriesPoint]
+    history_points: int
     error: str | None = None
 
 

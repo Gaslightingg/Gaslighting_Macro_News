@@ -20,9 +20,14 @@ const HISTORY_LIMIT = 48;
 
 const HISTORY_STORAGE_KEY = "gm_history_v1";
 const DEFAULT_RANGE = "1y";
-const RANGE_OPTIONS = ["1m", "3m", "1y", "5y", "max"];
+const RANGE_OPTIONS = ["1y", "2y", "5y", "max"];
 
-const formatChange = (value) => `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;
+const formatChange = (value) => `${value > 0 ? "+" : ""}${value.toFixed(2)}`;
+const formatValue = (value, unit) => {
+  if (typeof value !== "number") return "—";
+  const formatted = value.toFixed(2);
+  return unit ? `${formatted} ${unit}` : formatted;
+};
 const formatPrice = (value) => (value < 10 ? value.toFixed(4) : value.toFixed(2));
 const formatTime = (date) =>
   date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
@@ -119,8 +124,8 @@ const ChartModal = ({ indicator, onClose }) => {
 
   if (!indicator) return null;
 
-  const tableRows = seriesData?.series?.slice(-50).reverse() ?? [];
-  const chartValues = seriesData?.series ?? [];
+  const tableRows = seriesData?.points?.slice(-50).reverse() ?? [];
+  const chartValues = seriesData?.points ?? [];
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -129,9 +134,9 @@ const ChartModal = ({ indicator, onClose }) => {
           <div>
             <h3>{indicator.name}</h3>
             <p className="modal-subtitle">
-              {seriesData?.source ?? indicator.source} · {seriesData?.units ?? indicator.units}
+              {seriesData?.source ?? indicator.source} · {seriesData?.unit ?? indicator.units}
               {" · "}
-              {seriesData?.frequency ?? indicator.frequency}
+              {seriesData?.expected_frequency ?? indicator.frequency}
             </p>
           </div>
           <button type="button" className="modal-close" onClick={onClose}>
@@ -153,7 +158,7 @@ const ChartModal = ({ indicator, onClose }) => {
         <div className="modal-chart">
           {loading && <p>Loading chart...</p>}
           {error && <p className="error-banner">{error}</p>}
-          {!loading && !error && (
+          {!loading && !error && chartValues.length > 0 && (
             <svg viewBox="0 0 600 220" width="100%" height="220">
               <path
                 d={buildSparklinePath(
@@ -166,6 +171,9 @@ const ChartModal = ({ indicator, onClose }) => {
                 strokeWidth="2"
               />
             </svg>
+          )}
+          {!loading && !error && chartValues.length === 0 && (
+            <p>No historical data available.</p>
           )}
         </div>
         <div className="modal-table">
@@ -187,7 +195,6 @@ const ChartModal = ({ indicator, onClose }) => {
 
 function App() {
   const [prices, setPrices] = useState(null);
-  const [macro, setMacro] = useState(null);
   const [macroCategories, setMacroCategories] = useState([]);
   const [macroLatest, setMacroLatest] = useState([]);
   const [signals, setSignals] = useState(null);
@@ -203,6 +210,7 @@ function App() {
   );
 
   const [selectedIndicator, setSelectedIndicator] = useState(null);
+  const [debugMode, setDebugMode] = useState(false);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -213,16 +221,14 @@ function App() {
     const load = async () => {
       try {
         console.info(`[api] base url set to ${API_BASE}`);
-        const [pricesRes, macroRes, signalsRes, categoriesRes, latestRes] =
+        const [pricesRes, signalsRes, categoriesRes, latestRes] =
           await Promise.all([
           fetchJson(`${API_BASE}/api/prices`),
-          fetchJson(`${API_BASE}/api/macro`),
           fetchJson(`${API_BASE}/api/signals`),
           fetchJson(`${API_BASE}/api/macro/categories`),
           fetchJson(`${API_BASE}/api/macro/latest`),
         ]);
         setPrices(pricesRes);
-        setMacro(macroRes);
         setSignals(signalsRes);
         setMacroCategories(categoriesRes.categories ?? []);
         setMacroLatest(latestRes.latest ?? []);
@@ -244,13 +250,7 @@ function App() {
             next.prices[ticker.symbol] = historyArr.slice(-HISTORY_LIMIT);
           });
 
-          macroRes?.series?.forEach((item) => {
-            const value = parseNumeric(item.value);
-            if (value === null) return;
-            const historyArr = next.macro[item.name] ? [...next.macro[item.name]] : [];
-            historyArr.push(value);
-            next.macro[item.name] = historyArr.slice(-HISTORY_LIMIT);
-          });
+          // Macro history is sourced from real series endpoints only.
 
           localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(next));
           return next;
@@ -285,6 +285,19 @@ function App() {
     });
     return map;
   }, [macroLatest]);
+
+  const minPointsForFrequency = (frequency) => {
+    switch (frequency) {
+      case "monthly":
+        return 12;
+      case "weekly":
+        return 26;
+      case "daily":
+        return 60;
+      default:
+        return 12;
+    }
+  };
 
   return (
     <div className="app">
@@ -343,7 +356,7 @@ function App() {
         <div className="section-header">
           <h2>Macro data</h2>
           <span className="section-meta">
-            Updated: {macro?.as_of ?? "Loading..."}
+            Updated: {macroLatest[0]?.last_updated ?? "Loading..."}
           </span>
         </div>
         {macroCategories.map((category) => (
@@ -359,6 +372,8 @@ function App() {
                 <span>Last updated</span>
                 <span>Why it matters</span>
                 <span>Trend</span>
+                <span>Status</span>
+                <span>Quality</span>
                 <span></span>
               </div>
               {category.indicators.map((indicator) => {
@@ -366,26 +381,53 @@ function App() {
                 return (
                   <div key={indicator.id} className="table-row">
                     <span className="table-title">{indicator.name}</span>
-                    <span>{latest?.value ?? "—"}</span>
+                    <span>{formatValue(latest?.value, latest?.unit)}</span>
                     <span
                       className={`table-change ${
-                        latest?.change?.startsWith("-") ? "negative" : "positive"
+                        typeof latest?.change === "number" && latest.change < 0
+                          ? "negative"
+                          : "positive"
                       }`}
                     >
-                      {latest?.change ?? "—"}
+                      {typeof latest?.change === "number"
+                        ? formatChange(latest.change)
+                        : "—"}
                     </span>
-                    <span className="table-date">{latest?.updated ?? "—"}</span>
+                    <span className="table-date">{latest?.last_updated ?? "—"}</span>
                     <span className="table-note">{indicator.why_it_matters}</span>
-                    <Sparkline
-                      values={history.macro?.[indicator.name]}
-                      className={
-                        latest?.change?.startsWith("-") ? "negative" : "positive"
-                      }
-                    />
+                    {history.macro?.[indicator.id]?.length ? (
+                      <Sparkline
+                        values={history.macro?.[indicator.id]}
+                        className={
+                          typeof latest?.change === "number" && latest.change < 0
+                            ? "negative"
+                            : "positive"
+                        }
+                      />
+                    ) : (
+                      <span className="table-note">—</span>
+                    )}
+                    <span
+                      className={`status-badge ${latest?.status ?? "unknown"}`}
+                      title={`${latest?.source ?? "unknown"} · ${
+                        latest?.last_updated ?? "no date"
+                      }${latest?.error ? ` · ${latest.error}` : ""}`}
+                    >
+                      {latest?.status ?? "unknown"}
+                    </span>
+                    <span className={`quality-badge ${latest?.quality ?? "low"}`}>
+                      {latest?.quality ?? "low"}
+                    </span>
                     <button
                       type="button"
                       className="chart-btn"
                       onClick={() => setSelectedIndicator(indicator)}
+                      disabled={
+                        !latest ||
+                        latest.status === "unavailable" ||
+                        latest.history_points <
+                          minPointsForFrequency(latest.expected_frequency)
+                      }
                     >
                       Chart
                     </button>
@@ -395,7 +437,7 @@ function App() {
             </div>
           </div>
         ))}
-        <p className="commentary">{macro?.commentary ?? "Loading..."}</p>
+        <p className="commentary">Data sourced from FRED/BEA with cache-aware status.</p>
       </section>
 
       <section className="section">
@@ -427,6 +469,21 @@ function App() {
         </div>
         <p className="disclaimer">{signals?.disclaimer ?? "Not financial advice"}</p>
       </section>
+      <div className="debug-toggle">
+        <label>
+          <input
+            type="checkbox"
+            checked={debugMode}
+            onChange={(event) => setDebugMode(event.target.checked)}
+          />
+          Debug mode
+        </label>
+      </div>
+      {debugMode && (
+        <pre className="debug-panel">
+          {JSON.stringify(macroLatest.slice(0, 5), null, 2)}
+        </pre>
+      )}
       {selectedIndicator && (
         <ChartModal
           indicator={selectedIndicator}

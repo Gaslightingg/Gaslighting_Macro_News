@@ -95,8 +95,8 @@ This script starts the FastAPI backend and the Vite dev server (requires `npm` o
 - `GET /api/macro`
 - `GET /api/macro/categories`
 - `GET /api/macro/latest`
-- `GET /api/macro/series/{indicator_id}?range=1m|3m|1y|5y|max`
-- `GET /api/macro/series?indicator=<id>&range=1m|3m|1y|5y|max`
+- `GET /api/macro/series/{indicator_id}?range=1y|2y|5y|max`
+- `GET /api/macro/series?indicator=<id>&range=1y|2y|5y|max`
 - `POST /api/macro/refresh`
 - `GET /api/signals`
 - `GET /api/health`
