@@ -19,12 +19,18 @@ class Settings(BaseSettings):
         validation_alias="MARKET_DATA_DB_PATH",
     )
     request_timeout: float = Field(default=10.0, validation_alias="REQUEST_TIMEOUT")
+    cors_origins: str = Field(default="*", validation_alias="BACKEND_CORS_ORIGINS")
 
     def resolved_database_path(self) -> Path:
         path = Path(self.database_path)
         if not path.is_absolute():
             path = Path(__file__).resolve().parents[3] / path
         return path
+
+    def parsed_cors_origins(self) -> list[str]:
+        if self.cors_origins.strip() == "*":
+            return ["*"]
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
 
 @lru_cache(maxsize=1)

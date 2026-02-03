@@ -25,6 +25,7 @@ Key variables for real data mode:
 - `MARKET_DATA_PROVIDER=real` to enable live data fetching.
 - `FRED_API_KEY` and `BEA_API_KEY` for macro data.
 - `MARKET_DATA_DB_PATH` for the local SQLite cache.
+- `BACKEND_CORS_ORIGINS` (comma-separated) to allow frontend origins (default `*`).
 
 ### Data sources
 
