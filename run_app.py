@@ -18,6 +18,12 @@ def _find_npm() -> str | None:
     return shutil.which("npm")
 
 
+def _find_node() -> str | None:
+    if os.name == "nt":
+        return shutil.which("node.exe") or shutil.which("node")
+    return shutil.which("node")
+
+
 def _vite_script(frontend_dir: Path) -> Path:
     return frontend_dir / "node_modules" / "vite" / "bin" / "vite.js"
 
@@ -41,7 +47,8 @@ def main() -> int:
     ]
 
     npm_executable = _find_npm()
-    frontend_available = npm_executable is not None
+    node_executable = _find_node()
+    frontend_available = npm_executable is not None or node_executable is not None
     backend_dir = _resolve_dir("backend")
     frontend_dir = _resolve_dir("frontend")
     vite_script = _vite_script(frontend_dir)
@@ -56,10 +63,22 @@ def main() -> int:
 
     backend = _start_process(backend_cmd, cwd=backend_dir)
     frontend = None
-    if frontend_available and vite_script.exists():
+    if frontend_available and vite_script.exists() and node_executable is not None:
         frontend_cmd = [
-            sys.executable,
+            node_executable,
             str(vite_script),
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "5173",
+        ]
+        frontend = _start_process(frontend_cmd, cwd=frontend_dir)
+    elif frontend_available and npm_executable is not None:
+        frontend_cmd = [
+            npm_executable,
+            "run",
+            "dev",
+            "--",
             "--host",
             "0.0.0.0",
             "--port",
@@ -68,7 +87,7 @@ def main() -> int:
         frontend = _start_process(frontend_cmd, cwd=frontend_dir)
     else:
         print(
-            "Frontend dependencies not found (run npm install); frontend will not be started.",
+            "Frontend dependencies not found (run npm install) or Node.js is missing; frontend will not be started.",
             file=sys.stderr,
         )
 
