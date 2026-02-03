@@ -2,25 +2,45 @@ import { useEffect, useState } from "react";
 import "./App.css";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+const REQUEST_TIMEOUT = 8000;
 
 const formatChange = (value) => `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;
 const formatPrice = (value) => (value < 10 ? value.toFixed(4) : value.toFixed(2));
+
+const fetchJson = async (url) => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`Request failed: ${response.status}`);
+    }
+    return await response.json();
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
 
 function App() {
   const [prices, setPrices] = useState(null);
   const [macro, setMacro] = useState(null);
   const [signals, setSignals] = useState(null);
+  const [error, setError] = useState(null);
 
   useEffect(() => {
     const load = async () => {
-      const [pricesRes, macroRes, signalsRes] = await Promise.all([
-        fetch(`${API_BASE}/api/prices`),
-        fetch(`${API_BASE}/api/macro`),
-        fetch(`${API_BASE}/api/signals`),
-      ]);
-      setPrices(await pricesRes.json());
-      setMacro(await macroRes.json());
-      setSignals(await signalsRes.json());
+      try {
+        const [pricesRes, macroRes, signalsRes] = await Promise.all([
+          fetchJson(`${API_BASE}/api/prices`),
+          fetchJson(`${API_BASE}/api/macro`),
+          fetchJson(`${API_BASE}/api/signals`),
+        ]);
+        setPrices(pricesRes);
+        setMacro(macroRes);
+        setSignals(signalsRes);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to load data.");
+      }
     };
 
     load();
@@ -38,6 +58,8 @@ function App() {
         </div>
         <div className="pill">{prices?.as_of ?? "Loading..."}</div>
       </header>
+
+      {error && <div className="error-banner">{error}</div>}
 
       <section className="section">
         <h2>Tickers</h2>

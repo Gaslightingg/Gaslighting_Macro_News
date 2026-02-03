@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Iterable
 
+from .models.schemas import MacroSeriesItem, SignalItem
 
 _NUMBER_RE = re.compile(r"-?\\d+(?:\\.\\d+)?")
 
@@ -28,13 +30,13 @@ class MacroFactors:
     inflation: float
 
 
-def derive_factors(series: list[dict]) -> MacroFactors:
-    by_name = {item["name"]: item for item in series}
+def derive_factors(series: Iterable[MacroSeriesItem]) -> MacroFactors:
+    by_name = {item.name: item for item in series}
 
-    pmi = _parse_number(by_name.get("PMI/ISM", {}).get("value", "0"))
-    vix = _parse_number(by_name.get("VIX", {}).get("value", "0"))
-    nfp = _parse_number(by_name.get("NFP", {}).get("value", "0"))
-    unemployment = _parse_number(by_name.get("Unemployment Rate", {}).get("value", "0"))
+    pmi = _parse_number(getattr(by_name.get("PMI/ISM"), "value", "0"))
+    vix = _parse_number(getattr(by_name.get("VIX"), "value", "0"))
+    nfp = _parse_number(getattr(by_name.get("NFP"), "value", "0"))
+    unemployment = _parse_number(getattr(by_name.get("Unemployment Rate"), "value", "0"))
 
     risk_on = 0.0
     if pmi >= 50:
@@ -46,8 +48,8 @@ def derive_factors(series: list[dict]) -> MacroFactors:
     if unemployment > 4.2:
         risk_on -= 1.0
 
-    dxy_change = _parse_change(by_name.get("DXY", {}).get("change", "0"))
-    rates_change = _parse_change(by_name.get("US10Y", {}).get("change", "0"))
+    dxy_change = _parse_change(getattr(by_name.get("DXY"), "change", "0"))
+    rates_change = _parse_change(getattr(by_name.get("US10Y"), "change", "0"))
     usd_strength = 0.0
     if dxy_change > 0:
         usd_strength += 1.0
@@ -58,9 +60,9 @@ def derive_factors(series: list[dict]) -> MacroFactors:
 
     rates = 1.0 if rates_change > 0 else -1.0 if rates_change < 0 else 0.0
 
-    cpi = _parse_number(by_name.get("CPI", {}).get("value", "0"))
-    core_cpi = _parse_number(by_name.get("Core CPI", {}).get("value", "0"))
-    pce = _parse_number(by_name.get("PCE", {}).get("value", "0"))
+    cpi = _parse_number(getattr(by_name.get("CPI"), "value", "0"))
+    core_cpi = _parse_number(getattr(by_name.get("Core CPI"), "value", "0"))
+    pce = _parse_number(getattr(by_name.get("PCE"), "value", "0"))
     inflation = 0.0
     if cpi >= 3:
         inflation += 1.0
@@ -101,7 +103,7 @@ def _reason_label(factor: str, value: float) -> str:
     return "Macro backdrop mixed"
 
 
-def build_signals(series: list[dict], tickers: list[str]) -> list[dict]:
+def build_signals(series: Iterable[MacroSeriesItem], tickers: list[str]) -> list[SignalItem]:
     factors = derive_factors(series)
     weights = {
         "S&P500": {"risk_on": 0.7, "usd_strength": -0.2, "rates": -0.4, "inflation": -0.3},
@@ -137,12 +139,12 @@ def build_signals(series: list[dict], tickers: list[str]) -> list[dict]:
             reasons.append("Macro backdrop mixed")
 
         signals.append(
-            {
-                "ticker": ticker,
-                "direction": _direction(score),
-                "confidence": _confidence(score),
-                "reasons": reasons,
-            }
+            SignalItem(
+                ticker=ticker,
+                direction=_direction(score),
+                confidence=_confidence(score),
+                reasons=reasons,
+            )
         )
 
     return signals
