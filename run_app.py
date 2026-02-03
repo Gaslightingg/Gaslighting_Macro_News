@@ -4,10 +4,16 @@ import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 
-def _start_process(command: list[str], cwd: str) -> subprocess.Popen:
-    return subprocess.Popen(command, cwd=cwd)
+def _start_process(command: list[str], cwd: Path) -> subprocess.Popen:
+    return subprocess.Popen(command, cwd=str(cwd))
+
+
+def _resolve_dir(name: str) -> Path:
+    script_root = Path(__file__).resolve().parent
+    return (script_root / name).resolve()
 
 
 def main() -> int:
@@ -26,11 +32,21 @@ def main() -> int:
     frontend_cmd = ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
 
     frontend_available = shutil.which("npm") is not None
+    backend_dir = _resolve_dir("backend")
+    frontend_dir = _resolve_dir("frontend")
 
-    backend = _start_process(backend_cmd, cwd="backend")
+    if not backend_dir.exists():
+        print(f"Backend directory not found: {backend_dir}", file=sys.stderr)
+        return 1
+
+    if frontend_available and not frontend_dir.exists():
+        print(f"Frontend directory not found: {frontend_dir}", file=sys.stderr)
+        return 1
+
+    backend = _start_process(backend_cmd, cwd=backend_dir)
     frontend = None
     if frontend_available:
-        frontend = _start_process(frontend_cmd, cwd="frontend")
+        frontend = _start_process(frontend_cmd, cwd=frontend_dir)
     else:
         print("npm is not available; frontend will not be started.", file=sys.stderr)
 
