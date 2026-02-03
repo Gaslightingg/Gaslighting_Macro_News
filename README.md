@@ -57,6 +57,16 @@ npm install
 
 4. Start the configuration and open `http://localhost:5173`.
 
+## Run everything with a single script
+
+If you prefer a single command locally, run the helper script:
+
+```bash
+python run_app.py
+```
+
+This script starts the FastAPI backend and the Vite dev server (requires `npm` on your PATH).
+
 ## API routes
 
 - `GET /api/prices`
