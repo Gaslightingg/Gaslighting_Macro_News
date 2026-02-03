@@ -18,6 +18,10 @@ def _find_npm() -> str | None:
     return shutil.which("npm")
 
 
+def _vite_script(frontend_dir: Path) -> Path:
+    return frontend_dir / "node_modules" / "vite" / "bin" / "vite.js"
+
+
 def _resolve_dir(name: str) -> Path:
     script_root = Path(__file__).resolve().parent
     return (script_root / name).resolve()
@@ -37,20 +41,10 @@ def main() -> int:
     ]
 
     npm_executable = _find_npm()
-    frontend_cmd = [
-        npm_executable or "npm",
-        "run",
-        "dev",
-        "--",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "5173",
-    ]
-
     frontend_available = npm_executable is not None
     backend_dir = _resolve_dir("backend")
     frontend_dir = _resolve_dir("frontend")
+    vite_script = _vite_script(frontend_dir)
 
     if not backend_dir.exists():
         print(f"Backend directory not found: {backend_dir}", file=sys.stderr)
@@ -62,11 +56,19 @@ def main() -> int:
 
     backend = _start_process(backend_cmd, cwd=backend_dir)
     frontend = None
-    if frontend_available:
+    if frontend_available and vite_script.exists():
+        frontend_cmd = [
+            sys.executable,
+            str(vite_script),
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "5173",
+        ]
         frontend = _start_process(frontend_cmd, cwd=frontend_dir)
     else:
         print(
-            "npm executable not found; frontend will not be started.",
+            "Frontend dependencies not found (run npm install); frontend will not be started.",
             file=sys.stderr,
         )
 
@@ -77,7 +79,7 @@ def main() -> int:
                 return 1
             if frontend is not None and frontend.poll() is not None:
                 print("Frontend process stopped.", file=sys.stderr)
-                return 1
+                frontend = None
             time.sleep(1)
     except KeyboardInterrupt:
         print("Shutting down...", file=sys.stderr)
