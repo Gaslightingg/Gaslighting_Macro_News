@@ -26,6 +26,7 @@ Key variables for real data mode:
 - `FRED_API_KEY` and `BEA_API_KEY` for macro data.
 - `MARKET_DATA_DB_PATH` for the local SQLite cache.
 - `BACKEND_CORS_ORIGINS` (comma-separated) to allow frontend origins (default `*`).
+- `VITE_API_URL` to override the API base URL in the frontend (defaults to the current host on port 8000).
 
 ### Data sources
 

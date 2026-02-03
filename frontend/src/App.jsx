@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
 import "./App.css";
 
-const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+const DEFAULT_API_BASE = `http://${window.location.hostname}:8000`;
+const API_BASE = (import.meta.env.VITE_API_URL || DEFAULT_API_BASE).replace(
+  /\/$/,
+  "",
+);
 const REQUEST_TIMEOUT = 8000;
 
 const formatChange = (value) => `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;
@@ -11,11 +15,17 @@ const fetchJson = async (url) => {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
   try {
+    console.info(`[api] requesting ${url}`);
     const response = await fetch(url, { signal: controller.signal });
     if (!response.ok) {
+      console.warn(`[api] ${url} responded with ${response.status}`);
       throw new Error(`Request failed: ${response.status}`);
     }
+    console.info(`[api] ${url} OK`);
     return await response.json();
+  } catch (error) {
+    console.error(`[api] ${url} failed`, error);
+    throw error;
   } finally {
     clearTimeout(timeoutId);
   }
@@ -30,6 +40,7 @@ function App() {
   useEffect(() => {
     const load = async () => {
       try {
+        console.info(`[api] base url set to ${API_BASE}`);
         const [pricesRes, macroRes, signalsRes] = await Promise.all([
           fetchJson(`${API_BASE}/api/prices`),
           fetchJson(`${API_BASE}/api/macro`),
