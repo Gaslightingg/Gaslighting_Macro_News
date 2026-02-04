@@ -10,6 +10,7 @@ from typing import Any, Iterable
 import httpx
 
 from ..models.schemas import MacroResponse, PricesResponse
+from .price_normalizer import normalize_price_ticker
 from ..utils.database import MarketDataStore
 from ..utils.settings import Settings, get_settings
 from .base import MarketDataProvider
@@ -25,6 +26,7 @@ class RealMarketDataProvider(MarketDataProvider):
 
     async def get_prices(self) -> PricesResponse:
         price_rows: list[dict[str, Any]] = []
+        tickers: list[dict[str, Any]] = []
         as_of = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
         async with _build_async_client(self.timeout) as client:
@@ -50,8 +52,16 @@ class RealMarketDataProvider(MarketDataProvider):
                             price, change_pct, updated, source = cached
                         else:
                             logger.warning("No price data for %s", label)
+                            tickers.append(
+                                normalize_price_ticker(
+                                    {"symbol": label},
+                                    now=datetime.utcnow(),
+                                    source=None,
+                                    status="unavailable",
+                                    error="No price data available",
+                                )
+                            )
                             return
-
                 as_of = max(as_of, updated)
                 price_rows.append(
                     {
@@ -62,6 +72,20 @@ class RealMarketDataProvider(MarketDataProvider):
                         "source": source,
                     }
                 )
+                tickers.append(
+                    normalize_price_ticker(
+                        {
+                            "symbol": label,
+                            "price": price,
+                            "change_pct": change_pct,
+                            "last_updated": updated,
+                            "history_points": len(self.store.load_price_history(label)),
+                        },
+                        now=datetime.utcnow(),
+                        source=source,
+                        status="live",
+                    )
+                )
 
             await asyncio.gather(*[fetch_for_config(config) for config in _PRICE_SOURCES])
 
@@ -69,17 +93,7 @@ class RealMarketDataProvider(MarketDataProvider):
             self.store.upsert_prices(price_rows)
             self.store.insert_price_history(price_rows)
 
-        return PricesResponse(
-            as_of=as_of,
-            tickers=[
-                {
-                    "symbol": row["symbol"],
-                    "price": row["price"],
-                    "change_pct": row["change_pct"],
-                }
-                for row in price_rows
-            ],
-        )
+        return PricesResponse(as_of=as_of, tickers=tickers)
 
     async def get_macro(self) -> MacroResponse:
         macro_rows: list[dict[str, str]] = []
