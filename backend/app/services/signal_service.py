@@ -22,7 +22,7 @@ async def get_signals_payload(provider: MarketDataProvider | None = None) -> Sig
     provider = provider or get_provider()
     macro, prices = await asyncio.gather(
         get_macro_payload(provider),
-        get_prices_payload(provider),
+        get_prices_payload(),
     )
     tickers = [item.id for item in prices.tickers]
     response = SignalsResponse(
