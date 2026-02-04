@@ -147,7 +147,9 @@ async def _ensure_latest(
     stooq_symbol: str,
 ) -> dict[str, object] | None:
     cached = await store.get_latest(symbol_id)
-    if cached and _is_fresh(cached.get("updated_at"), LATEST_TTL):
+    meta_key = f"latest:{symbol_id}:updated_at"
+    last_update = await store.get_meta(meta_key)
+    if cached and _is_fresh(last_update, LATEST_TTL):
         return cached
 
     latest = await _fetch_stooq_latest(client, stooq_symbol)
@@ -161,9 +163,9 @@ async def _ensure_latest(
             "source": "stooq",
             "status": "live",
             "quality": "high",
-            "updated_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
         await store.upsert_latest(symbol_id, payload)
+        await store.set_meta(meta_key, datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
         return payload
 
     if cached:

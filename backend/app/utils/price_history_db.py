@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+import logging
 from pathlib import Path
 from typing import Any
-import logging
+
 import aiosqlite
 
 logger = logging.getLogger(__name__)
@@ -31,10 +31,11 @@ class PriceHistoryStore:
                 """
                 CREATE TABLE IF NOT EXISTS price_history (
                     symbol TEXT NOT NULL,
-                    date TEXT NOT NULL,
-                    value REAL NOT NULL,
+                    price REAL NOT NULL,
+                    change_pct REAL,
+                    as_of TEXT NOT NULL,
                     source TEXT,
-                    PRIMARY KEY (symbol, date)
+                    PRIMARY KEY (symbol, as_of)
                 )
                 """
             )
@@ -42,14 +43,10 @@ class PriceHistoryStore:
                 """
                 CREATE TABLE IF NOT EXISTS price_latest (
                     symbol TEXT PRIMARY KEY,
-                    value REAL,
-                    change REAL,
+                    price REAL,
                     change_pct REAL,
-                    last_updated TEXT,
-                    source TEXT,
-                    status TEXT,
-                    quality TEXT,
-                    updated_at TEXT
+                    as_of TEXT,
+                    source TEXT
                 )
                 """
             )
@@ -63,8 +60,6 @@ class PriceHistoryStore:
             )
             await self._log_schema(conn, "price_history")
             await self._log_schema(conn, "price_latest")
-            await self._migrate_value_column(conn, "price_history")
-            await self._migrate_value_column(conn, "price_latest")
             await conn.commit()
         self._initialized = True
 
@@ -77,65 +72,12 @@ class PriceHistoryStore:
         if row and row["sql"]:
             logger.info("Schema for %s: %s", table_name, row["sql"])
 
-    async def _migrate_value_column(self, conn: aiosqlite.Connection, table_name: str) -> None:
-        async with conn.execute(f"PRAGMA table_info({table_name})") as cur:
-            columns = [row[1] for row in await cur.fetchall()]
-        if "value" in columns:
-            return
-        fallback = None
-        for candidate in ("price", "close"):
-            if candidate in columns:
-                fallback = candidate
-                break
-        if fallback:
-            logger.warning(
-                "Table %s missing value column; migrating from %s column.",
-                table_name,
-                fallback,
-            )
-            await conn.execute(f"ALTER TABLE {table_name} ADD COLUMN value REAL")
-            await conn.execute(f"UPDATE {table_name} SET value = {fallback}")
-        else:
-            logger.warning(
-                "Table %s missing value column without fallback; recreating cache table.",
-                table_name,
-            )
-            await conn.execute(f"DROP TABLE IF EXISTS {table_name}")
-            if table_name == "price_history":
-                await conn.execute(
-                    """
-                    CREATE TABLE price_history (
-                        symbol TEXT NOT NULL,
-                        date TEXT NOT NULL,
-                        value REAL NOT NULL,
-                        source TEXT,
-                        PRIMARY KEY (symbol, date)
-                    )
-                    """
-                )
-            elif table_name == "price_latest":
-                await conn.execute(
-                    """
-                    CREATE TABLE price_latest (
-                        symbol TEXT PRIMARY KEY,
-                        value REAL,
-                        change REAL,
-                        change_pct REAL,
-                        last_updated TEXT,
-                        source TEXT,
-                        status TEXT,
-                        quality TEXT,
-                        updated_at TEXT
-                    )
-                    """
-                )
-
     async def get_history(self, symbol: str) -> list[HistoryPoint]:
         await self._ensure_initialized()
         async with aiosqlite.connect(self.db_path) as conn:
             conn.row_factory = aiosqlite.Row
             async with conn.execute(
-                "SELECT date, value FROM price_history WHERE symbol = ? ORDER BY date ASC",
+                "SELECT as_of AS date, price AS value FROM price_history WHERE symbol = ? ORDER BY as_of ASC",
                 (symbol,),
             ) as cur:
                 rows = await cur.fetchall()
@@ -148,10 +90,10 @@ class PriceHistoryStore:
         async with aiosqlite.connect(self.db_path) as conn:
             await conn.executemany(
                 """
-                INSERT OR REPLACE INTO price_history (symbol, date, value, source)
-                VALUES (?, ?, ?, ?)
+                INSERT OR REPLACE INTO price_history (symbol, price, change_pct, as_of, source)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                [(symbol, point.date, point.value, source) for point in points],
+                [(symbol, point.value, None, point.date, source) for point in points],
             )
             await conn.commit()
 
@@ -161,7 +103,12 @@ class PriceHistoryStore:
             conn.row_factory = aiosqlite.Row
             async with conn.execute(
                 """
-                SELECT symbol, value, change, change_pct, last_updated, source, status, quality, updated_at
+                SELECT symbol,
+                       price AS value,
+                       change_pct AS change,
+                       change_pct AS change_pct,
+                       as_of AS last_updated,
+                       source
                 FROM price_latest WHERE symbol = ?
                 """,
                 (symbol,),
@@ -171,24 +118,19 @@ class PriceHistoryStore:
 
     async def upsert_latest(self, symbol: str, payload: dict[str, Any]) -> None:
         await self._ensure_initialized()
-        updated_at = payload.get("updated_at") or datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
         async with aiosqlite.connect(self.db_path) as conn:
             await conn.execute(
                 """
                 INSERT OR REPLACE INTO price_latest (
-                    symbol, value, change, change_pct, last_updated, source, status, quality, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    symbol, price, change_pct, as_of, source
+                ) VALUES (?, ?, ?, ?, ?)
                 """,
                 (
                     symbol,
                     payload.get("value"),
-                    payload.get("change"),
                     payload.get("change_pct"),
                     payload.get("last_updated"),
                     payload.get("source"),
-                    payload.get("status"),
-                    payload.get("quality"),
-                    updated_at,
                 ),
             )
             await conn.commit()
