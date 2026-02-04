@@ -4,8 +4,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-import sqlite3
-
 import aiosqlite
 
 
@@ -65,11 +63,12 @@ class PriceHistoryStore:
     async def get_history(self, symbol: str) -> list[HistoryPoint]:
         await self._ensure_initialized()
         async with aiosqlite.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = await conn.execute_fetchall(
+            conn.row_factory = aiosqlite.Row
+            async with conn.execute(
                 "SELECT date, value FROM price_history WHERE symbol = ? ORDER BY date ASC",
                 (symbol,),
-            )
+            ) as cur:
+                rows = await cur.fetchall()
         return [HistoryPoint(date=row["date"], value=row["value"]) for row in rows]
 
     async def upsert_history(self, symbol: str, points: list[HistoryPoint], source: str | None) -> None:
@@ -89,14 +88,15 @@ class PriceHistoryStore:
     async def get_latest(self, symbol: str) -> dict[str, Any] | None:
         await self._ensure_initialized()
         async with aiosqlite.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            row = await conn.execute_fetchone(
+            conn.row_factory = aiosqlite.Row
+            async with conn.execute(
                 """
                 SELECT symbol, value, change, change_pct, last_updated, source, status, quality, updated_at
                 FROM price_latest WHERE symbol = ?
                 """,
                 (symbol,),
-            )
+            ) as cur:
+                row = await cur.fetchone()
         return dict(row) if row else None
 
     async def upsert_latest(self, symbol: str, payload: dict[str, Any]) -> None:
@@ -126,10 +126,11 @@ class PriceHistoryStore:
     async def get_meta(self, key: str) -> str | None:
         await self._ensure_initialized()
         async with aiosqlite.connect(self.db_path) as conn:
-            row = await conn.execute_fetchone(
+            async with conn.execute(
                 "SELECT value FROM cache_meta WHERE key = ?",
                 (key,),
-            )
+            ) as cur:
+                row = await cur.fetchone()
         return row[0] if row else None
 
     async def set_meta(self, key: str, value: str) -> None:
