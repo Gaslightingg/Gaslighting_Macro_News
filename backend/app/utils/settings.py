@@ -15,8 +15,21 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=(str(_ROOT_DIR / ".env"), str(_ROOT_DIR / "backend" / ".env")),
         env_file_encoding="utf-8",
+        extra="forbid",
     )
 
+    backend_host: str = Field(
+        default="127.0.0.1",
+        validation_alias=AliasChoices("BACKEND_HOST", "backend_host"),
+    )
+    backend_port: int = Field(
+        default=8000,
+        validation_alias=AliasChoices("BACKEND_PORT", "backend_port"),
+    )
+    vite_api_url: str = Field(
+        default="http://localhost:8000",
+        validation_alias=AliasChoices("VITE_API_URL", "vite_api_url"),
+    )
     market_data_provider: str = Field(default="auto", validation_alias="MARKET_DATA_PROVIDER")
     fred_api_key: Optional[str] = Field(default=None, validation_alias="FRED_API_KEY")
     bea_api_key: Optional[str] = Field(
