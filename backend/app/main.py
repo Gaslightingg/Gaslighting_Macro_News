@@ -24,6 +24,22 @@ settings = get_settings()
 origins = settings.parsed_cors_origins()
 CacheStore(settings.cache_db_url)
 logger.info("CORS origins: %s", origins)
+
+
+def _mask_key(value: str | None) -> str:
+    if not value:
+        return "not set"
+    clean = value.strip()
+    if len(clean) <= 4:
+        return "***"
+    if len(clean) <= 8:
+        return f"{clean[:2]}...{clean[-2:]}"
+    return f"{clean[:4]}...{clean[-4:]}"
+
+
+logger.info("FRED API key: %s", _mask_key(settings.fred_api_key))
+logger.info("BEA API key: %s", _mask_key(settings.bea_api_key))
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,

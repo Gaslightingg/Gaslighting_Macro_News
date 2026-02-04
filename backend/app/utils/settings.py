@@ -4,16 +4,25 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+_ROOT_DIR = Path(__file__).resolve().parents[3]
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=(str(_ROOT_DIR / ".env"), str(_ROOT_DIR / "backend" / ".env")),
+        env_file_encoding="utf-8",
+    )
 
     market_data_provider: str = Field(default="auto", validation_alias="MARKET_DATA_PROVIDER")
-    fred_api_key: Optional[str] = None
-    bea_api_key: Optional[str] = None
+    fred_api_key: Optional[str] = Field(default=None, validation_alias="FRED_API_KEY")
+    bea_api_key: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("BEA_API_KEY", "BEA_USER_ID"),
+    )
     fred_pmi_series_id: str = Field(default="NAPM", validation_alias="FRED_PMI_SERIES_ID")
     database_path: str = Field(
         default="backend/data/market_data.sqlite3",
