@@ -5,24 +5,52 @@ from typing import List
 from pydantic import BaseModel
 
 
+class PriceHistoryPoint(BaseModel):
+    date: str
+    value: float
+
+
+class PriceHistoryMeta(BaseModel):
+    data_start: str | None
+    data_end: str | None
+    interval: str
+    points_count: int
+
+
 class PriceTicker(BaseModel):
     id: str
+    symbol: str
     name: str
     asset_class: str
+    unit: str | None
     value: float | None
     change: float | None
-    unit: str | None
+    change_pct: float | None
     last_updated: str | None
-    status: str
     source: str | None
+    status: str
     quality: str
     error: str | None = None
-    history_points: int
+    history_points: List[PriceHistoryPoint]
+    history_meta: PriceHistoryMeta | None
 
 
 class PricesResponse(BaseModel):
     as_of: str
     tickers: List[PriceTicker]
+
+
+class PriceHistoryResponse(BaseModel):
+    id: str
+    symbol: str
+    name: str
+    asset_class: str
+    unit: str | None
+    source: str | None
+    status: str
+    quality: str
+    points: List[PriceHistoryPoint]
+    history_meta: PriceHistoryMeta
 
 
 class MacroSeriesItem(BaseModel):

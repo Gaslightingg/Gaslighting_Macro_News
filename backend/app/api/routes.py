@@ -8,6 +8,7 @@ from ..models.schemas import (
     MacroLatestResponse,
     MacroResponse,
     MacroSeriesResponse,
+    PriceHistoryResponse,
     PricesResponse,
     SignalsResponse,
 )
@@ -18,7 +19,7 @@ from ..services.macro_series_service import (
     get_series_payload,
 )
 from ..services.macro_service import get_macro_payload
-from ..services.price_service import get_prices_payload
+from ..services.price_service import get_price_history_payload, get_prices_payload
 from ..services.signal_service import get_signals_payload
 
 router = APIRouter(prefix="/api")
@@ -34,33 +35,12 @@ async def prices() -> PricesResponse:
     return await get_prices_payload()
 
 
-@router.get("/prices/series/{ticker_id}")
-async def price_series(ticker_id: str, range: str = "1y") -> dict[str, object]:
-    # Placeholder: use stored history only; no upstream fetch to avoid fake data.
-    from ..utils.database import MarketDataStore
-    from ..utils.settings import get_settings
-
-    settings = get_settings()
-    store = MarketDataStore(settings.resolved_database_path())
-    latest = {row["symbol"]: row for row in store.load_prices()}
-    history = store.load_price_history(ticker_id)
-    points = [
-        {"date": row["as_of"], "value": row["price"]}
-        for row in history
-        if row.get("price") is not None
-    ]
-    status = "live" if points else "unavailable"
-    latest_row = latest.get(ticker_id)
-    return {
-        "ticker_id": ticker_id,
-        "name": ticker_id,
-        "unit": "USD",
-        "source": latest_row["source"] if latest_row else None,
-        "expected_frequency": "daily",
-        "status": status,
-        "points": points,
-        "history_points": len(points),
-    }
+@router.get("/prices/history", response_model=PriceHistoryResponse)
+async def price_history(symbol: str, range: str = "1y") -> PriceHistoryResponse:
+    try:
+        return await get_price_history_payload(symbol, range)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/macro", response_model=MacroResponse)

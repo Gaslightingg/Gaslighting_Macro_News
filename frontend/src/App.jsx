@@ -16,11 +16,10 @@ const resolveApiBase = () => {
 const API_BASE = resolveApiBase();
 const REQUEST_TIMEOUT = 8000;
 const REFRESH_INTERVAL_MS = 60 * 60 * 1000;
-const HISTORY_LIMIT = 48;
-
 const HISTORY_STORAGE_KEY = "gm_history_v1";
 const DEFAULT_RANGE = "1y";
 const RANGE_OPTIONS = ["1y", "2y", "5y", "max"];
+const PRICE_RANGE_OPTIONS = ["1m", "3m", "6m", "1y", "2y", "5y", "10y", "max"];
 
 const formatChange = (value) => `${value > 0 ? "+" : ""}${value.toFixed(2)}`;
 const formatValue = (value, unit) => {
@@ -31,17 +30,6 @@ const formatValue = (value, unit) => {
 const formatPrice = (value) => (value < 10 ? value.toFixed(4) : value.toFixed(2));
 const formatTime = (date) =>
   date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-
-const parseNumeric = (value) => {
-  if (typeof value === "number") {
-    return value;
-  }
-  if (!value) {
-    return null;
-  }
-  const parsed = Number.parseFloat(String(value).replace(",", ""));
-  return Number.isFinite(parsed) ? parsed : null;
-};
 
 const buildSparklinePath = (values, width, height) => {
   if (!values || values.length < 2) {
@@ -98,18 +86,24 @@ const fetchJson = async (url, signal) => {
   }
 };
 
-const ChartModal = ({ indicator, onClose, endpoint }) => {
+const ChartModal = ({ indicator, onClose, mode }) => {
   const [range, setRange] = useState(DEFAULT_RANGE);
   const [seriesData, setSeriesData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  const rangeOptions = mode === "price" ? PRICE_RANGE_OPTIONS : RANGE_OPTIONS;
 
   useEffect(() => {
     if (!indicator) return;
     const loadSeries = async () => {
       try {
         setLoading(true);
-        const data = await fetchJson(`${API_BASE}${endpoint}${indicator.id}?range=${range}`);
+        const endpoint =
+          mode === "price"
+            ? `${API_BASE}/api/prices/history?symbol=${indicator.id}&range=${range}`
+            : `${API_BASE}/api/macro/series/${indicator.id}?range=${range}`;
+        const data = await fetchJson(endpoint);
         setSeriesData(data);
         setError(null);
       } catch (err) {
@@ -119,31 +113,38 @@ const ChartModal = ({ indicator, onClose, endpoint }) => {
       }
     };
     loadSeries();
-  }, [indicator, range]);
+  }, [indicator, range, mode]);
 
   if (!indicator) return null;
 
   const tableRows = seriesData?.points?.slice(-50).reverse() ?? [];
   const chartValues = seriesData?.points ?? [];
+  const title = indicator.symbol ?? indicator.name ?? indicator.id;
+  const subtitle =
+    mode === "price"
+      ? `${seriesData?.source ?? indicator.source ?? "stooq"} · ${indicator.unit ?? "USD"} · ${range.toUpperCase()}`
+      : `${seriesData?.source ?? indicator.source} · ${seriesData?.unit ?? indicator.units} · ${
+          seriesData?.expected_frequency ?? indicator.frequency
+        }`;
+  const availability = seriesData?.history_meta?.data_start
+    ? `Data available since ${seriesData.history_meta.data_start}`
+    : "Data availability unknown";
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" onClick={(event) => event.stopPropagation()}>
         <div className="modal-header">
           <div>
-            <h3>{indicator.name}</h3>
-            <p className="modal-subtitle">
-              {seriesData?.source ?? indicator.source} · {seriesData?.unit ?? indicator.units}
-              {" · "}
-              {seriesData?.expected_frequency ?? indicator.frequency}
-            </p>
+            <h3>{title}</h3>
+            <p className="modal-subtitle">{subtitle}</p>
+            <p className="modal-meta">{availability}</p>
           </div>
           <button type="button" className="modal-close" onClick={onClose}>
             ✕
           </button>
         </div>
         <div className="modal-controls">
-          {RANGE_OPTIONS.map((option) => (
+          {rangeOptions.map((option) => (
             <button
               key={option}
               type="button"
@@ -172,7 +173,7 @@ const ChartModal = ({ indicator, onClose, endpoint }) => {
             </svg>
           )}
           {!loading && !error && chartValues.length === 0 && (
-            <p>No historical data available.</p>
+            <p>{seriesData?.error ?? "No historical data available."}</p>
           )}
         </div>
         <div className="modal-table">
@@ -200,7 +201,7 @@ function App() {
   const [error, setError] = useState(null);
   const [history, setHistory] = useState(() => {
     const stored = localStorage.getItem(HISTORY_STORAGE_KEY);
-    return stored ? JSON.parse(stored) : { prices: {}, macro: {} };
+    return stored ? JSON.parse(stored) : { macro: {} };
   });
   const [now, setNow] = useState(new Date());
   const [lastFetch, setLastFetch] = useState(null);
@@ -239,19 +240,8 @@ function App() {
         setError(null);
         setHistory((prev) => {
           const next = {
-            prices: { ...prev.prices },
             macro: { ...prev.macro },
           };
-
-          pricesRes?.tickers?.forEach((ticker) => {
-            const value = parseNumeric(ticker.value);
-            if (value === null) return;
-            const historyArr = next.prices[ticker.id]
-              ? [...next.prices[ticker.id]]
-              : [];
-            historyArr.push(value);
-            next.prices[ticker.id] = historyArr.slice(-HISTORY_LIMIT);
-          });
 
           localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(next));
           return next;
@@ -357,7 +347,7 @@ function App() {
           {prices?.tickers?.map((ticker) => (
             <article key={ticker.id} className="card">
               <div className="card-row">
-                <span className="symbol">{ticker.name}</span>
+                <span className="symbol">{ticker.symbol ?? ticker.name}</span>
                 <span className="price">{formatValue(ticker.value, ticker.unit)}</span>
               </div>
               <div
@@ -369,6 +359,19 @@ function App() {
               >
                 {typeof ticker.change === "number" ? formatChange(ticker.change) : "—"}
               </div>
+              <Sparkline
+                values={ticker.history_points?.map((point) => point.value) ?? []}
+                className={
+                  typeof ticker.change === "number" && ticker.change < 0
+                    ? "negative"
+                    : "positive"
+                }
+              />
+              <span className="ticker-meta">
+                {ticker.history_meta?.data_start
+                  ? `Data since ${ticker.history_meta.data_start}`
+                  : "Data availability pending"}
+              </span>
               <span className={`status-badge ${ticker.status}`} title={ticker.error ?? ""}>
                 {ticker.status}
               </span>
@@ -376,7 +379,7 @@ function App() {
               <button
                 type="button"
                 className="chart-btn"
-                disabled={ticker.status === "unavailable" || ticker.history_points < 12}
+                disabled={ticker.status === "unavailable"}
                 onClick={() => setSelectedTicker(ticker)}
               >
                 Chart
@@ -521,14 +524,14 @@ function App() {
       {selectedIndicator && (
         <ChartModal
           indicator={selectedIndicator}
-          endpoint="/api/macro/series/"
+          mode="macro"
           onClose={() => setSelectedIndicator(null)}
         />
       )}
       {selectedTicker && (
         <ChartModal
           indicator={selectedTicker}
-          endpoint="/api/prices/series/"
+          mode="price"
           onClose={() => setSelectedTicker(null)}
         />
       )}

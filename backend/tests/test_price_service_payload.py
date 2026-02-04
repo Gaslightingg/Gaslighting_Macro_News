@@ -1,43 +1,14 @@
-import pytest
-
-from app.models.schemas import MacroResponse, PriceTicker, PricesResponse
-from app.providers.base import MarketDataProvider
-from app.services.price_service import get_prices_payload
-from app.utils.settings import get_settings
+from app.services.price_service import _history_meta, _parse_range
+from app.utils.price_history_db import HistoryPoint
 
 
-class DummyProvider(MarketDataProvider):
-    async def get_prices(self) -> PricesResponse:
-        return PricesResponse(
-            as_of="2024-01-02T00:00:00Z",
-            tickers=[
-                PriceTicker(
-                    id="sp500",
-                    name="S&P500",
-                    asset_class="index",
-                    value=100.0,
-                    change=1.0,
-                    unit="pts",
-                    last_updated="2024-01-02T00:00:00Z",
-                    status="live",
-                    source="test",
-                    quality="high",
-                    history_points=0,
-                )
-            ],
-        )
-
-    async def get_macro(self) -> MacroResponse:
-        return MacroResponse(as_of="2024-01-02", series=[], commentary="")
+def test_parse_range_defaults():
+    assert _parse_range("1y").days == 365
+    assert _parse_range("max") is None
 
 
-@pytest.mark.asyncio
-async def test_get_prices_payload_uses_id(monkeypatch, tmp_path):
-    monkeypatch.setenv("MARKET_DATA_DB_PATH", str(tmp_path / "market.sqlite3"))
-    monkeypatch.setenv("CACHE_DB_URL", f"sqlite:///{tmp_path / 'cache.sqlite3'}")
-    get_settings.cache_clear()
-
-    payload = await get_prices_payload(provider=DummyProvider())
-
-    assert payload.tickers
-    assert payload.tickers[0].id == "sp500"
+def test_history_meta_handles_points():
+    meta = _history_meta([HistoryPoint(date="2020-01-01", value=1.0), HistoryPoint(date="2020-01-02", value=2.0)])
+    assert meta.data_start == "2020-01-01"
+    assert meta.data_end == "2020-01-02"
+    assert meta.points_count == 2

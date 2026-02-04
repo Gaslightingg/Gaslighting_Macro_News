@@ -54,7 +54,7 @@ class RealMarketDataProvider(MarketDataProvider):
                             logger.warning("No price data for %s", label)
                             tickers.append(
                                 normalize_price_ticker(
-                                    {"symbol": label},
+                                    {"symbol": label, "history_points": [], "history_meta": None},
                                     now=datetime.utcnow(),
                                     source=None,
                                     status="unavailable",
@@ -79,7 +79,8 @@ class RealMarketDataProvider(MarketDataProvider):
                             "price": price,
                             "change_pct": change_pct,
                             "last_updated": updated,
-                            "history_points": len(self.store.load_price_history(label)),
+                            "history_points": [],
+                            "history_meta": None,
                         },
                         now=datetime.utcnow(),
                         source=source,

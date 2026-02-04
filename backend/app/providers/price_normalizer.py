@@ -44,25 +44,36 @@ def normalize_price_ticker(
     error: str | None = None,
 ) -> dict:
     symbol = raw.get("symbol") or raw.get("name") or raw.get("id") or "Unknown"
+    name = raw.get("name") or symbol
     asset_class = raw.get("asset_class") or infer_asset_class(symbol)
     value = raw.get("price")
     if value is None:
         value = raw.get("value")
-    change = raw.get("change_pct")
-    if change is None:
-        change = raw.get("change")
+    change_pct = raw.get("change_pct")
+    change = raw.get("change")
+    if change_pct is None and change is not None:
+        change_pct = change
+    if change is None and change_pct is not None:
+        change = change_pct
     unit = raw.get("unit") or infer_unit(asset_class)
+    history_points = raw.get("history_points") or []
+    if isinstance(history_points, int):
+        history_points = []
+    history_meta = raw.get("history_meta")
     return {
         "id": raw.get("id") or slugify(symbol),
-        "name": symbol,
+        "symbol": symbol,
+        "name": name,
         "asset_class": asset_class,
         "value": value,
         "change": change,
+        "change_pct": change_pct,
         "unit": unit,
         "last_updated": raw.get("last_updated") or now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "status": status,
         "source": source,
         "quality": "high" if status == "live" else "low",
         "error": error,
-        "history_points": raw.get("history_points") or 0,
+        "history_points": history_points,
+        "history_meta": history_meta,
     }
