@@ -6,9 +6,18 @@ from pydantic import BaseModel
 
 
 class PriceTicker(BaseModel):
-    symbol: str
-    price: float
-    change_pct: float
+    id: str
+    name: str
+    asset_class: str
+    value: float | None
+    change: float | None
+    unit: str | None
+    last_updated: str | None
+    status: str
+    source: str | None
+    quality: str
+    error: str | None = None
+    history_points: int
 
 
 class PricesResponse(BaseModel):

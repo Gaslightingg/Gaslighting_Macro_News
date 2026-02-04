@@ -125,6 +125,14 @@ class MarketDataStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def load_price_history(self, symbol: str) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT symbol, price, as_of FROM price_history WHERE symbol = ? ORDER BY as_of ASC",
+                (symbol,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def load_macro(self) -> list[dict]:
         with self._connect() as conn:
             rows = conn.execute(

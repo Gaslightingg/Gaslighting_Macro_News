@@ -24,7 +24,7 @@ async def get_signals_payload(provider: MarketDataProvider | None = None) -> Sig
         get_macro_payload(provider),
         get_prices_payload(provider),
     )
-    tickers = [item.symbol for item in prices.tickers]
+    tickers = [item.id for item in prices.tickers]
     response = SignalsResponse(
         as_of=macro.as_of,
         disclaimer="Not financial advice",

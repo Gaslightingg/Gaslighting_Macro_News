@@ -92,6 +92,7 @@ This script starts the FastAPI backend and the Vite dev server (requires `npm` o
 ## API routes
 
 - `GET /api/prices`
+- `GET /api/prices/series/{ticker_id}?range=1y|2y|5y|max`
 - `GET /api/macro`
 - `GET /api/macro/categories`
 - `GET /api/macro/latest`

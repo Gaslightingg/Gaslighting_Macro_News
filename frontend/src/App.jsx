@@ -77,12 +77,13 @@ const Sparkline = ({ values, className }) => {
   );
 };
 
-const fetchJson = async (url) => {
+const fetchJson = async (url, signal) => {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+  const combinedSignal = signal ?? controller.signal;
   try {
     console.info(`[api] requesting ${url}`);
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(url, { signal: combinedSignal });
     if (!response.ok) {
       console.warn(`[api] ${url} responded with ${response.status}`);
       throw new Error(`Request failed: ${response.status}`);
@@ -97,7 +98,7 @@ const fetchJson = async (url) => {
   }
 };
 
-const ChartModal = ({ indicator, onClose }) => {
+const ChartModal = ({ indicator, onClose, endpoint }) => {
   const [range, setRange] = useState(DEFAULT_RANGE);
   const [seriesData, setSeriesData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -108,9 +109,7 @@ const ChartModal = ({ indicator, onClose }) => {
     const loadSeries = async () => {
       try {
         setLoading(true);
-        const data = await fetchJson(
-          `${API_BASE}/api/macro/series/${indicator.id}?range=${range}`,
-        );
+        const data = await fetchJson(`${API_BASE}${endpoint}${indicator.id}?range=${range}`);
         setSeriesData(data);
         setError(null);
       } catch (err) {
@@ -210,6 +209,7 @@ function App() {
   );
 
   const [selectedIndicator, setSelectedIndicator] = useState(null);
+  const [selectedTicker, setSelectedTicker] = useState(null);
   const [debugMode, setDebugMode] = useState(false);
 
   useEffect(() => {
@@ -218,15 +218,18 @@ function App() {
   }, [theme]);
 
   useEffect(() => {
+    let timeoutId;
+    let intervalId;
+    const controller = new AbortController();
     const load = async () => {
       try {
         console.info(`[api] base url set to ${API_BASE}`);
         const [pricesRes, signalsRes, categoriesRes, latestRes] =
           await Promise.all([
-          fetchJson(`${API_BASE}/api/prices`),
-          fetchJson(`${API_BASE}/api/signals`),
-          fetchJson(`${API_BASE}/api/macro/categories`),
-          fetchJson(`${API_BASE}/api/macro/latest`),
+          fetchJson(`${API_BASE}/api/prices`, controller.signal),
+          fetchJson(`${API_BASE}/api/signals`, controller.signal),
+          fetchJson(`${API_BASE}/api/macro/categories`, controller.signal),
+          fetchJson(`${API_BASE}/api/macro/latest`, controller.signal),
         ]);
         setPrices(pricesRes);
         setSignals(signalsRes);
@@ -241,16 +244,14 @@ function App() {
           };
 
           pricesRes?.tickers?.forEach((ticker) => {
-            const value = parseNumeric(ticker.price);
+            const value = parseNumeric(ticker.value);
             if (value === null) return;
-            const historyArr = next.prices[ticker.symbol]
-              ? [...next.prices[ticker.symbol]]
+            const historyArr = next.prices[ticker.id]
+              ? [...next.prices[ticker.id]]
               : [];
             historyArr.push(value);
-            next.prices[ticker.symbol] = historyArr.slice(-HISTORY_LIMIT);
+            next.prices[ticker.id] = historyArr.slice(-HISTORY_LIMIT);
           });
-
-          // Macro history is sourced from real series endpoints only.
 
           localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(next));
           return next;
@@ -260,9 +261,29 @@ function App() {
       }
     };
 
+    const nextQuarterDelayMs = () => {
+      const now = new Date();
+      const minutes = now.getMinutes();
+      const nextQuarter = (Math.floor(minutes / 15) + 1) * 15;
+      const next = new Date(now);
+      if (nextQuarter >= 60) {
+        next.setHours(now.getHours() + 1, 0, 0, 0);
+      } else {
+        next.setMinutes(nextQuarter, 0, 0);
+      }
+      return next.getTime() - now.getTime();
+    };
+
     load();
-    const intervalId = setInterval(load, REFRESH_INTERVAL_MS);
-    return () => clearInterval(intervalId);
+    timeoutId = setTimeout(() => {
+      load();
+      intervalId = setInterval(load, 15 * 60 * 1000);
+    }, nextQuarterDelayMs());
+    return () => {
+      controller.abort();
+      clearTimeout(timeoutId);
+      clearInterval(intervalId);
+    };
   }, []);
 
   useEffect(() => {
@@ -310,6 +331,9 @@ function App() {
           </p>
           <div className="meta-row">
             <span className="meta-chip">Local time: {formatTime(now)}</span>
+            <span className="meta-chip">
+              Last refresh: {lastFetch ? formatTime(lastFetch) : "—"}
+            </span>
             <span className="meta-chip">Next refresh: {nextRefresh}</span>
           </div>
         </div>
@@ -331,22 +355,32 @@ function App() {
         <h2>Tickers</h2>
         <div className="grid tickers">
           {prices?.tickers?.map((ticker) => (
-            <article key={ticker.symbol} className="card">
+            <article key={ticker.id} className="card">
               <div className="card-row">
-                <span className="symbol">{ticker.symbol}</span>
-                <span className="price">{formatPrice(ticker.price)}</span>
+                <span className="symbol">{ticker.name}</span>
+                <span className="price">{formatValue(ticker.value, ticker.unit)}</span>
               </div>
               <div
                 className={`change ${
-                  ticker.change_pct >= 0 ? "positive" : "negative"
+                  typeof ticker.change === "number" && ticker.change < 0
+                    ? "negative"
+                    : "positive"
                 }`}
               >
-                {formatChange(ticker.change_pct)}
+                {typeof ticker.change === "number" ? formatChange(ticker.change) : "—"}
               </div>
-              <Sparkline
-                values={history.prices?.[ticker.symbol]}
-                className={ticker.change_pct >= 0 ? "positive" : "negative"}
-              />
+              <span className={`status-badge ${ticker.status}`} title={ticker.error ?? ""}>
+                {ticker.status}
+              </span>
+              <span className={`quality-badge ${ticker.quality}`}>{ticker.quality}</span>
+              <button
+                type="button"
+                className="chart-btn"
+                disabled={ticker.status === "unavailable" || ticker.history_points < 12}
+                onClick={() => setSelectedTicker(ticker)}
+              >
+                Chart
+              </button>
             </article>
           ))}
         </div>
@@ -487,7 +521,15 @@ function App() {
       {selectedIndicator && (
         <ChartModal
           indicator={selectedIndicator}
+          endpoint="/api/macro/series/"
           onClose={() => setSelectedIndicator(null)}
+        />
+      )}
+      {selectedTicker && (
+        <ChartModal
+          indicator={selectedTicker}
+          endpoint="/api/prices/series/"
+          onClose={() => setSelectedTicker(null)}
         />
       )}
     </div>
