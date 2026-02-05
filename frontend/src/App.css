@@ -438,8 +438,8 @@ body {
 .chart-shell {
   padding: 14px;
   width: 100%;
-  height: 100%;
-  min-height: 420px;
+  height: 520px;
+  min-height: 520px;
   max-height: none;
 }
 
@@ -458,7 +458,31 @@ body {
 .chart-fade-in {
   display: flex;
   align-items: stretch;
+  position: relative;
+  opacity: 0.35;
   animation: chartFade 220ms ease-out both;
+}
+
+.chart-fade-in.ready {
+  opacity: 1;
+}
+
+.chart-fade-in.pending {
+  opacity: 0.55;
+}
+
+.chart-inline-loading {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--panel-border);
+  background: rgba(9, 15, 24, 0.72);
+  color: var(--text-secondary);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .chart-skeleton {
@@ -612,6 +636,7 @@ body {
   }
 
   .chart-shell { min-height: 360px; padding: 10px; }
+  .chart-shell { height: 360px; }
 }
 
 @media (min-width: 1440px) {
@@ -622,6 +647,7 @@ body {
   }
 
   .chart-shell {
-    min-height: 520px;
+    height: 620px;
+    min-height: 620px;
   }
 }

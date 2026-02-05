@@ -9,6 +9,7 @@ const resolveApiBase = () => {
 };
 
 const API_BASE = resolveApiBase();
+const IS_DEV = Boolean(import.meta.env.DEV);
 const REQUEST_TIMEOUT = 8000;
 const REFRESH_INTERVAL_MS = 60 * 60 * 1000;
 const DEFAULT_RANGE = "1y";
@@ -152,8 +153,10 @@ const ChartModal = ({ indicator, mode, onClose }) => {
   const chartCanvasRef = useRef(null);
   const closeEnabledRef = useRef(false);
   const [chartReady, setChartReady] = useState(false);
-  const [chartRenderKey, setChartRenderKey] = useState(0);
+  const [chartRenderNonce, setChartRenderNonce] = useState(0);
   const [chartDims, setChartDims] = useState({ width: 0, height: 0 });
+  const lastGoodPointsRef = useRef([]);
+  const renderCountRef = useRef(0);
 
   const options = mode === "price" ? PRICE_RANGE_OPTIONS : RANGE_OPTIONS;
 
@@ -180,6 +183,7 @@ const ChartModal = ({ indicator, mode, onClose }) => {
     window.addEventListener("keydown", onKeyDown);
 
     return () => {
+      if (IS_DEV) console.debug("[chart-modal] unmount modal", { id: indicator?.id, mode });
       window.clearTimeout(timer);
       window.removeEventListener("keydown", onKeyDown);
       document.body.style.overflow = previousOverflow;
@@ -191,23 +195,43 @@ const ChartModal = ({ indicator, mode, onClose }) => {
     if (!indicator || !chartShellRef.current) return;
     const node = chartShellRef.current;
 
+    let resizeDebounceTimer;
+
     const updateDims = (source) => {
       const rect = node.getBoundingClientRect();
-      console.debug("[chart-modal] container size", {
-        source,
-        width: Math.round(rect.width),
-        height: Math.round(rect.height),
-      });
+      if (IS_DEV) {
+        console.debug("[chart-modal] container size", {
+          source,
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        });
+      }
       setChartDims({ width: rect.width, height: rect.height });
     };
 
     updateDims("mount");
     const observer = new ResizeObserver(() => {
-      updateDims("resize");
+      window.clearTimeout(resizeDebounceTimer);
+      resizeDebounceTimer = window.setTimeout(() => {
+        const rect = node.getBoundingClientRect();
+        if (rect.width < 300 || rect.height < 200) {
+          if (IS_DEV) {
+            console.debug("[chart-modal] ignored unstable resize", {
+              width: Math.round(rect.width),
+              height: Math.round(rect.height),
+            });
+          }
+          return;
+        }
+        updateDims("resize");
+      }, 80);
     });
     observer.observe(node);
 
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      window.clearTimeout(resizeDebounceTimer);
+    };
   }, [indicator, range]);
 
   useEffect(() => {
@@ -223,6 +247,9 @@ const ChartModal = ({ indicator, mode, onClose }) => {
             ? `${API_BASE}/api/prices/history?symbol=${indicator.id}&range=${range}`
             : `${API_BASE}/api/macro/series/${indicator.id}?range=${range}`;
         const data = await fetchJson(endpoint);
+        if (IS_DEV && !Array.isArray(data?.points)) {
+          console.debug("[chart-modal] fetched series without points array", { endpoint, payload: data });
+        }
         setSeriesData(data);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load chart.");
@@ -241,28 +268,77 @@ const ChartModal = ({ indicator, mode, onClose }) => {
   if (!indicator) return null;
 
   const normalizedPoints = useMemo(() => normalizeSeriesPoints(seriesData?.points), [seriesData]);
-  const values = normalizedPoints.map((pt) => pt.value);
-  const rows = normalizedPoints.slice(-30).reverse();
+  useEffect(() => {
+    if (normalizedPoints.length > 1) {
+      lastGoodPointsRef.current = normalizedPoints;
+    } else if (IS_DEV && seriesData?.points && normalizedPoints.length === 0) {
+      console.debug("[chart-modal] normalized points became empty", {
+        id: indicator.id,
+        mode,
+        range,
+        rawPoints: seriesData.points.length,
+      });
+    }
+  }, [indicator.id, mode, range, normalizedPoints, seriesData]);
+
+  const visiblePoints = normalizedPoints.length > 1 ? normalizedPoints : lastGoodPointsRef.current;
+  const values = visiblePoints.map((pt) => pt.value);
+  const rows = visiblePoints.slice(-30).reverse();
   const minChartWidth = window.innerWidth >= 900 ? 400 : 220;
   const minChartHeight = window.innerWidth >= 900 ? 280 : 220;
-  const canRenderChart = !loading && !error && chartReady && chartDims.width >= minChartWidth && chartDims.height >= minChartHeight;
+  const hasInitialData = visiblePoints.length > 1;
+  const hasStableDims = chartDims.width >= minChartWidth && chartDims.height >= minChartHeight;
+  const canShowChart = hasInitialData && hasStableDims;
+
+  renderCountRef.current += 1;
+  if (IS_DEV) {
+    console.debug("[chart-modal] render", {
+      renderCount: renderCountRef.current,
+      timeframe: range,
+      pointsLength: visiblePoints.length,
+      containerW: Math.round(chartDims.width),
+      containerH: Math.round(chartDims.height),
+      loading,
+      chartReady,
+    });
+  }
 
   useEffect(() => {
-    if (!canRenderChart || !chartCanvasRef.current || !chartShellRef.current) return;
+    if (!canShowChart || !chartCanvasRef.current || !chartShellRef.current) return;
     const chartRect = chartCanvasRef.current.getBoundingClientRect();
     const shellRect = chartShellRef.current.getBoundingClientRect();
-    console.debug("[chart-modal] rendered chart width check", {
-      chartWidth: Math.round(chartRect.width),
-      containerWidth: Math.round(shellRect.width),
-    });
-    if (chartRect.width < shellRect.width * 0.6) {
-      console.warn("[chart-modal] detected narrow chart render; forcing rerender", {
+    if (IS_DEV) {
+      console.debug("[chart-modal] rendered chart width check", {
         chartWidth: Math.round(chartRect.width),
         containerWidth: Math.round(shellRect.width),
       });
-      window.requestAnimationFrame(() => setChartRenderKey((prev) => prev + 1));
     }
-  }, [canRenderChart, chartDims.width, chartDims.height, normalizedPoints.length]);
+    if (chartRect.width < shellRect.width * 0.6) {
+      if (IS_DEV) {
+        console.warn("[chart-modal] detected narrow chart render; forcing recovery", {
+          chartWidth: Math.round(chartRect.width),
+          containerWidth: Math.round(shellRect.width),
+        });
+      }
+      window.requestAnimationFrame(() => {
+        setChartRenderNonce((prev) => prev + 1);
+        window.requestAnimationFrame(() => {
+          if (chartShellRef.current) {
+            const nextRect = chartShellRef.current.getBoundingClientRect();
+            setChartDims({ width: nextRect.width, height: nextRect.height });
+          }
+        });
+      });
+    }
+  }, [canShowChart, chartDims.width, chartDims.height, visiblePoints.length, chartRenderNonce]);
+
+  useEffect(() => {
+    if (!IS_DEV) return;
+    console.debug("[chart-modal] mount chart layer", { id: indicator.id, mode });
+    return () => {
+      console.debug("[chart-modal] unmount chart layer", { id: indicator.id, mode });
+    };
+  }, [indicator.id, mode]);
 
   return (
     <div
@@ -297,13 +373,14 @@ const ChartModal = ({ indicator, mode, onClose }) => {
         </div>
 
         <div ref={chartShellRef} className="chart-shell panel chart-fixed-height" title="Chart">
-          {loading || !chartReady || chartDims.width < minChartWidth || chartDims.height < minChartHeight ? (
+          {!hasInitialData ? (
             <div className="chart-skeleton" />
           ) : error ? (
             <div className="terminal-state error">{error}</div>
           ) : (
-            <div ref={chartCanvasRef} className="chart-fade-in" key={chartRenderKey}>
-              <Sparkline values={values} points={normalizedPoints} tone="flat" variant="large" />
+            <div ref={chartCanvasRef} className={`chart-fade-in ${chartReady && canShowChart ? "ready" : "pending"}`} data-render-nonce={chartRenderNonce}>
+              <Sparkline values={values} points={visiblePoints} tone="flat" variant="large" />
+              {loading ? <div className="chart-inline-loading">Updating…</div> : null}
             </div>
           )}
         </div>
