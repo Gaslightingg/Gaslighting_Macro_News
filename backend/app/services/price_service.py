@@ -21,6 +21,26 @@ HISTORY_TTL = timedelta(hours=24)
 SPARKLINE_POINTS = 120
 
 
+
+_store_cache: dict[str, PriceHistoryStore] = {}
+_store_cache_lock = asyncio.Lock()
+
+
+async def _get_store() -> PriceHistoryStore:
+    settings = get_settings()
+    db_path = settings.resolved_database_path()
+    cache_key = str(db_path)
+    store = _store_cache.get(cache_key)
+    if store is not None:
+        return store
+
+    async with _store_cache_lock:
+        store = _store_cache.get(cache_key)
+        if store is None:
+            store = PriceHistoryStore(db_path)
+            _store_cache[cache_key] = store
+    return store
+
 def _parse_range(range_key: str) -> timedelta | None:
     mapping = {
         "1m": timedelta(days=30),
@@ -176,8 +196,7 @@ async def _ensure_latest(
 
 
 async def get_prices_payload() -> PricesResponse:
-    settings = get_settings()
-    store = PriceHistoryStore(settings.resolved_database_path())
+    store = await _get_store()
     now = datetime.utcnow()
 
     async with httpx.AsyncClient(timeout=20) as client:
@@ -239,12 +258,11 @@ async def _build_ticker_payload(config, store: PriceHistoryStore, client: httpx.
 
 
 async def get_price_history_payload(symbol: str, range_key: str) -> PriceHistoryResponse:
-    settings = get_settings()
     config = resolve_price_config(symbol)
     if not config:
         raise ValueError(f"Unknown symbol: {symbol}")
 
-    store = PriceHistoryStore(settings.resolved_database_path())
+    store = await _get_store()
     async with httpx.AsyncClient(timeout=20) as client:
         history = await _ensure_history(store, client, config.id, config.stooq_symbol)
 
