@@ -24,6 +24,7 @@ class FredClient:
         limit: int = 500,
         sort_order: str = "desc",
         retries: int = 2,
+        observation_start: str | None = None,
     ) -> list[dict[str, Any]]:
         url = "https://api.stlouisfed.org/fred/series/observations"
         params = {
@@ -33,6 +34,8 @@ class FredClient:
             "sort_order": sort_order,
             "limit": limit,
         }
+        if observation_start:
+            params["observation_start"] = observation_start
         attempt = 0
         while True:
             try:
@@ -40,6 +43,15 @@ class FredClient:
                 response.raise_for_status()
                 payload = response.json()
                 return payload.get("observations", [])
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                if 400 <= status_code < 500:
+                    logger.warning("FRED returned %s for %s; skipping series", status_code, series_id)
+                    return []
+                attempt += 1
+                if attempt > retries:
+                    logger.warning("FRED request failed for %s: %s", series_id, exc)
+                    return []
             except httpx.HTTPError as exc:
                 attempt += 1
                 if attempt > retries:

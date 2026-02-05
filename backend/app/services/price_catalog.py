@@ -12,7 +12,8 @@ class PriceConfig:
     asset_class: str
     unit: str | None
     stooq_symbol: str
-    yfinance_symbol: str
+    stooq_fallback_symbols: tuple[str, ...] = ()
+    yfinance_symbol: str = ""
 
 
 PRICE_TICKERS: Iterable[PriceConfig] = (
@@ -23,6 +24,7 @@ PRICE_TICKERS: Iterable[PriceConfig] = (
         asset_class="index",
         unit="pts",
         stooq_symbol="spx",
+        stooq_fallback_symbols=("^spx", "spx.us"),
         yfinance_symbol="^GSPC",
     ),
     PriceConfig(
@@ -32,6 +34,7 @@ PRICE_TICKERS: Iterable[PriceConfig] = (
         asset_class="index",
         unit="pts",
         stooq_symbol="ndx",
+        stooq_fallback_symbols=("^ndx", "ndx.us"),
         yfinance_symbol="^NDX",
     ),
     PriceConfig(
@@ -41,6 +44,7 @@ PRICE_TICKERS: Iterable[PriceConfig] = (
         asset_class="index",
         unit="pts",
         stooq_symbol="nq.f",
+        stooq_fallback_symbols=("nq=F",),
         yfinance_symbol="NQ=F",
     ),
     PriceConfig(

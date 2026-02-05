@@ -21,6 +21,7 @@ SERIES_RANGE_LIMITS = {
     "1y": 380,
     "2y": 800,
     "5y": 2000,
+    "10y": 4000,
     "max": 5000,
 }
 
@@ -44,6 +45,20 @@ def _stale_after_seconds(frequency: str) -> int:
         "irregular": 24 * 3600,
     }
     return mapping.get(frequency, 6 * 3600)
+
+
+def _observation_start_for_range(range_key: str) -> str | None:
+    # Chart should default to 10 years; use date-based filtering instead of only point limits.
+    windows = {
+        "1y": 365,
+        "2y": 365 * 2,
+        "5y": 365 * 5,
+        "10y": 365 * 10,
+    }
+    days = windows.get(range_key)
+    if days is None:
+        return None
+    return (datetime.utcnow() - timedelta(days=days)).date().isoformat()
 
 
 def get_categories_payload() -> MacroCategoriesResponse:
@@ -70,7 +85,8 @@ def get_categories_payload() -> MacroCategoriesResponse:
 async def _fetch_series(
     indicator: MacroIndicator, range_key: str, client: FredClient, semaphore: asyncio.Semaphore
 ) -> tuple[list[tuple[str, float]], str | None]:
-    limit = SERIES_RANGE_LIMITS.get(range_key, SERIES_RANGE_LIMITS["1y"])
+    limit = SERIES_RANGE_LIMITS.get(range_key, SERIES_RANGE_LIMITS["10y"])
+    observation_start = _observation_start_for_range(range_key)
     settings = get_settings()
     if not indicator.fred_series:
         return [], "No data source configured"
@@ -83,7 +99,11 @@ async def _fetch_series(
         return [], "FRED API key not configured"
 
     async with semaphore:
-        observations = await client.get_series_observations(fred_series_id, limit=limit)
+        observations = await client.get_series_observations(
+            fred_series_id,
+            limit=limit,
+            observation_start=observation_start,
+        )
 
     points = parse_fred_points(observations)
     if points:
