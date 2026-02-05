@@ -166,6 +166,28 @@ class SignalCard(BaseModel):
     debug: SignalDebug
 
 
+class SignalsApiResponse(BaseModel):
+    updated_at: str
+    signals: List[SignalCard]
+    errors: List[str]
+
+
+class SignalsDebugTicker(BaseModel):
+    ticker: str
+    signal: str
+    confidence: int
+    missing_inputs: List[str]
+    reason: str | None = None
+
+
+class SignalsDebugResponse(BaseModel):
+    updated_at: str
+    tickers: List[str]
+    indicator_errors: dict[str, str]
+    provider_errors: List[str]
+    tickers_debug: List[SignalsDebugTicker]
+
+
 class RecomputeResponse(BaseModel):
     ok: bool
     updated_at: str

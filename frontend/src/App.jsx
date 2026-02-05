@@ -65,6 +65,30 @@ const Sparkline = ({ values, className }) => {
   );
 };
 
+
+const normalizeSignalsPayload = (payload) => {
+  if (!payload) {
+    return { updated_at: null, signals: [], errors: ["empty payload"] };
+  }
+  if (Array.isArray(payload)) {
+    // Backward compatibility for list-only responses.
+    return { updated_at: null, signals: payload, errors: [] };
+  }
+  if (!Array.isArray(payload.signals)) {
+    console.error("[signals] invalid payload shape", payload);
+    return {
+      updated_at: payload.updated_at ?? payload.as_of ?? null,
+      signals: [],
+      errors: ["invalid signals payload shape"],
+    };
+  }
+  return {
+    updated_at: payload.updated_at ?? payload.as_of ?? null,
+    signals: payload.signals,
+    errors: payload.errors ?? [],
+  };
+};
+
 const fetchJson = async (url, signal) => {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
@@ -233,7 +257,11 @@ function App() {
           fetchJson(`${API_BASE}/api/macro/latest`, controller.signal),
         ]);
         setPrices(pricesRes);
-        setSignals(signalsRes);
+        const normalizedSignals = normalizeSignalsPayload(signalsRes);
+        if (normalizedSignals.errors.length) {
+          console.warn("[signals] payload warnings", normalizedSignals.errors);
+        }
+        setSignals(normalizedSignals);
         setMacroCategories(categoriesRes.categories ?? []);
         setMacroLatest(latestRes.latest ?? []);
         setLastFetch(new Date());
@@ -481,30 +509,38 @@ function App() {
         <div className="section-header">
           <h2>Signals</h2>
           <span className="section-meta">
-            Updated: {signals?.as_of ?? "Loading..."}
+            Updated: {signals?.updated_at ?? "Loading..."}
           </span>
         </div>
         <div className="grid signals">
-          {signals?.signals?.map((signal) => (
-            <article key={signal.ticker} className="card">
-              <div className="card-row">
-                <p className="label">{signal.ticker}</p>
-                <span className={`status ${signal.direction?.toLowerCase()}`}>
-                  {signal.direction}
-                </span>
-              </div>
-              <p className="signal-confidence">
-                Confidence: {(signal.confidence * 100).toFixed(0)}%
-              </p>
-              <ul className="signal-reasons">
-                {signal.reasons?.map((reason) => (
-                  <li key={reason}>{reason}</li>
-                ))}
-              </ul>
-            </article>
-          ))}
+          {signals?.signals?.map((signal) => {
+            const direction = signal.signal ?? signal.direction ?? "NEUTRAL";
+            const confidencePct =
+              typeof signal.confidence === "number"
+                ? signal.confidence > 1
+                  ? signal.confidence
+                  : signal.confidence * 100
+                : 0;
+            const bullets = signal.bullets ?? signal.reasons ?? ["Insufficient data"];
+            return (
+              <article key={signal.ticker} className="card">
+                <div className="card-row">
+                  <p className="label">{signal.ticker}</p>
+                  <span className={`status ${direction?.toLowerCase()}`}>
+                    {direction}
+                  </span>
+                </div>
+                <p className="signal-confidence">Confidence: {Math.round(confidencePct)}%</p>
+                <ul className="signal-reasons">
+                  {bullets.map((reason) => (
+                    <li key={reason}>{reason}</li>
+                  ))}
+                </ul>
+              </article>
+            );
+          })}
         </div>
-        <p className="disclaimer">{signals?.disclaimer ?? "Not financial advice"}</p>
+        <p className="disclaimer">{signals?.errors?.length ? `Signals warnings: ${signals.errors.join("; ")}` : "Not financial advice"}</p>
       </section>
       <div className="debug-toggle">
         <label>
@@ -518,7 +554,7 @@ function App() {
       </div>
       {debugMode && (
         <pre className="debug-panel">
-          {JSON.stringify(macroLatest.slice(0, 5), null, 2)}
+          {JSON.stringify({ signals, macroLatest: macroLatest.slice(0, 5) }, null, 2)}
         </pre>
       )}
       {selectedIndicator && (

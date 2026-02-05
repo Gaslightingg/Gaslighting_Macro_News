@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from ..models.schemas import FactorsSnapshot, RecomputeResponse, SignalCard
+from ..models.schemas import FactorsSnapshot, RecomputeResponse, SignalCard, SignalsApiResponse, SignalsDebugResponse
 from ..services.signal_engine import MacroDataProvider, SignalEngine, SiteTickerProvider
 from ..utils.cache_db import CacheStore
 from ..utils.settings import get_settings
@@ -23,9 +23,11 @@ def _get_engine() -> SignalEngine:
     return _engine_cache
 
 
-async def get_signals_payload(force_recompute: bool = False) -> list[SignalCard]:
+async def get_signals_payload(force_recompute: bool = False) -> SignalsApiResponse:
     engine = _get_engine()
-    return await engine.computeSignals({"forceRecompute": force_recompute})
+    cards = await engine.computeSignals({"forceRecompute": force_recompute})
+    updated_at = cards[0].updated_at if cards else datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    return SignalsApiResponse(updated_at=updated_at, signals=cards, errors=[])
 
 
 async def get_signal_payload(ticker: str, force_recompute: bool = False) -> SignalCard:
@@ -36,6 +38,11 @@ async def get_signal_payload(ticker: str, force_recompute: bool = False) -> Sign
 async def get_factors_payload(force_recompute: bool = False) -> FactorsSnapshot:
     engine = _get_engine()
     return await engine.getFactorsSnapshot({"forceRecompute": force_recompute})
+
+
+async def get_signals_debug_payload() -> SignalsDebugResponse:
+    engine = _get_engine()
+    return await engine.getDebugSnapshot()
 
 
 async def recompute_signals_payload() -> RecomputeResponse:

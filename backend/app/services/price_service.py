@@ -86,16 +86,40 @@ async def _request_with_retries(
 
 
 def _parse_stooq_rows(csv_text: str) -> tuple[list[dict[str, str]], str | None]:
-    text = csv_text.strip()
+    text = (csv_text or "").strip()
     if not text:
-        return [], "empty csv"
-    reader = csv.DictReader(StringIO(text))
+        return [], "no data"
+    lowered = text.lower()
+    if lowered.startswith("<html") or lowered.startswith("<!doctype"):
+        return [], "html response"
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return [], "no data"
+    # Skip leading garbage lines until likely CSV header.
+    header_index = 0
+    for i, line in enumerate(lines[:5]):
+        if "," in line:
+            header_index = i
+            break
+    candidate_csv = "\n".join(lines[header_index:])
+    reader = csv.DictReader(StringIO(candidate_csv))
     if not reader.fieldnames:
         return [], "missing csv header"
-    required = {"Date", "Close"}
-    if not required.issubset(set(reader.fieldnames)):
-        return [], f"missing required columns: {sorted(required)}"
-    rows = [row for row in reader if row.get("Date") and row.get("Close")]
+
+    normalized_fields = {field.strip().lower(): field for field in reader.fieldnames if field}
+    date_key = normalized_fields.get("date")
+    close_key = normalized_fields.get("close")
+    if not date_key or not close_key:
+        return [], "no date/close columns"
+
+    rows: list[dict[str, str]] = []
+    for row in reader:
+        date = (row.get(date_key) or "").strip()
+        close = (row.get(close_key) or "").strip()
+        if not date or not close:
+            continue
+        rows.append({"Date": date, "Close": close})
     if not rows:
         return [], "no valid rows"
     return rows, None
@@ -112,7 +136,7 @@ async def _fetch_stooq_rows(
         return [], "request failed"
     rows, error = _parse_stooq_rows(response.text)
     if error is not None:
-        logger.warning("Invalid stooq CSV for symbol=%s: %s", stooq_symbol, error)
+        logger.info("Stooq no data for symbol=%s: %s", stooq_symbol, error)
     return rows, error
 
 

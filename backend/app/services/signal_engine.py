@@ -6,7 +6,15 @@ from datetime import datetime, timedelta
 from statistics import mean, pstdev
 from typing import Protocol
 
-from ..models.schemas import FactorContributor, FactorSnapshot, FactorsSnapshot, SignalCard, SignalDebug
+from ..models.schemas import (
+    FactorContributor,
+    FactorSnapshot,
+    FactorsSnapshot,
+    SignalCard,
+    SignalDebug,
+    SignalsDebugResponse,
+    SignalsDebugTicker,
+)
 from ..services.macro_catalog import all_indicators, find_indicator
 from ..services.macro_series_service import get_series_payload
 from ..services.price_catalog import PRICE_TICKERS
@@ -105,6 +113,8 @@ class SignalEngine:
         self.ticker_provider = ticker_provider
         self.cache = cache
         self.config = config or _default_config()
+        self._last_indicator_errors: dict[str, str] = {}
+        self._last_provider_errors: list[str] = []
 
     async def computeSignals(self, opts: dict | None = None) -> list[SignalCard]:
         opts = opts or {}
@@ -187,11 +197,17 @@ class SignalEngine:
         factor_defs = self.config.factor_definitions or {}
         needed_indicators = sorted({indicator for defs in factor_defs.values() for indicator, _ in defs if indicator in available})
 
+        self._last_indicator_errors = {}
+        self._last_provider_errors = []
         norm_map: dict[str, dict | None] = {}
         tasks = [self._normalized_indicator(indicator_id, force_recompute) for indicator_id in needed_indicators]
         results = await asyncio.gather(*tasks)
-        for indicator_id, normalized in zip(needed_indicators, results):
+        for indicator_id, result in zip(needed_indicators, results):
+            normalized = result.get("data")
+            reason = result.get("reason")
             norm_map[indicator_id] = normalized
+            if reason:
+                self._last_indicator_errors[indicator_id] = reason
 
         factors: dict[str, FactorSnapshot] = {}
         for factor_name, defs in factor_defs.items():
@@ -230,17 +246,38 @@ class SignalEngine:
         self.cache.set_cache(cache_key, snapshot.model_dump(), self.config.ttl_seconds)
         return snapshot
 
-    async def _normalized_indicator(self, indicator_id: str, force_recompute: bool) -> dict | None:
+    async def getDebugSnapshot(self) -> SignalsDebugResponse:
+        cards = await self.computeSignals({"forceRecompute": False})
+        tickers = await self.ticker_provider.listTickers()
+        tickers_debug = [
+            SignalsDebugTicker(
+                ticker=card.ticker,
+                signal=card.signal,
+                confidence=card.confidence,
+                missing_inputs=card.debug.missingInputs,
+                reason=("Insufficient data" if card.confidence <= 20 else None),
+            )
+            for card in cards
+        ]
+        return SignalsDebugResponse(
+            updated_at=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            tickers=tickers,
+            indicator_errors=dict(self._last_indicator_errors),
+            provider_errors=list(self._last_provider_errors),
+            tickers_debug=tickers_debug,
+        )
+
+    async def _normalized_indicator(self, indicator_id: str, force_recompute: bool) -> dict:
         cache_key = f"signals-engine:norm:{indicator_id}"
         if not force_recompute:
             cached = self.cache.get_cache(cache_key)
             if cached:
-                return cached
+                return {"data": cached, "reason": None}
 
         raw = await self._raw_series(indicator_id, force_recompute)
         points = raw.get("points", []) if raw else []
         if len(points) < 3:
-            return None
+            return {"data": None, "reason": "not enough points"}
 
         ordered = sorted(points, key=lambda item: item["t"])
         latest = ordered[-1]
@@ -248,17 +285,17 @@ class SignalEngine:
         delta_days = (self.config.delta_by_frequency or {}).get(frequency, self.config.default_interval_days)
         prev_value = _closest_past_value(ordered, latest["t"], delta_days)
         if prev_value is None:
-            return None
+            return {"data": None, "reason": "no prior point for delta window"}
 
         roll_start = datetime.strptime(latest["t"], "%Y-%m-%d") - timedelta(days=365 * self.config.rolling_years)
         roll_values = [item["value"] for item in ordered if datetime.strptime(item["t"], "%Y-%m-%d") >= roll_start]
         if len(roll_values) < 5:
-            return None
+            return {"data": None, "reason": "insufficient rolling window"}
 
         mu = mean(roll_values)
         sigma = pstdev(roll_values)
         if sigma == 0:
-            return None
+            return {"data": None, "reason": "zero variance"}
         zscore = (latest["value"] - mu) / sigma
         polarity = (self.config.indicator_polarity or {}).get(indicator_id, 1)
         normalized_score = _clamp(zscore / self.config.z_max, -1, 1) * polarity
@@ -272,7 +309,8 @@ class SignalEngine:
             "source": raw.get("source"),
         }
         self.cache.set_cache(cache_key, normalized, self.config.ttl_seconds)
-        return normalized
+        return {"data": normalized, "reason": None}
+
 
     async def _raw_series(self, indicator_id: str, force_recompute: bool) -> dict:
         cache_key = f"signals-engine:raw:{indicator_id}"
@@ -283,7 +321,11 @@ class SignalEngine:
 
         end = datetime.utcnow().date().isoformat()
         start = (datetime.utcnow() - timedelta(days=365 * 10)).date().isoformat()
-        data = await self.data_provider.getSeries(indicator_id, {"start": start, "end": end, "interval": "auto"})
+        try:
+            data = await self.data_provider.getSeries(indicator_id, {"start": start, "end": end, "interval": "auto"})
+        except Exception as exc:  # noqa: BLE001
+            self._last_provider_errors.append(f"{indicator_id}: {exc}")
+            data = {"points": [], "lastUpdated": None, "source": None}
         self.cache.set_cache(cache_key, data, self.config.ttl_seconds)
         return data
 
