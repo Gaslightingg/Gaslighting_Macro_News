@@ -109,6 +109,30 @@ body {
   gap: var(--space-2);
 }
 
+.view-switch-btn {
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--panel-border);
+  background: rgba(13, 19, 30, 0.72);
+  color: var(--text-dim);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 8px 14px;
+  cursor: pointer;
+  transition: transform 220ms ease, border-color 220ms ease, color 220ms ease;
+}
+
+.view-switch-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--panel-border-hover);
+}
+
+.view-switch-btn.active {
+  color: var(--text-primary);
+  border-color: rgba(143, 176, 236, 0.72);
+  box-shadow: 0 0 0 1px rgba(143, 176, 236, 0.2) inset;
+}
+
 .nav-mini a {
   color: var(--text-dim);
   text-decoration: none;
@@ -136,6 +160,63 @@ body {
 }
 
 .section { display: grid; gap: var(--space-2); }
+
+.view-slider-viewport {
+  width: 100%;
+  overflow: hidden;
+  min-height: 920px;
+}
+
+.view-slider-track {
+  width: 200%;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  transition: transform 420ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.view-slider-viewport.main-active .view-slider-track {
+  transform: translateX(0);
+}
+
+.view-slider-viewport.news-active .view-slider-track {
+  transform: translateX(-50%);
+}
+
+.view-page {
+  width: 100%;
+  min-width: 0;
+}
+
+.page-main {
+  display: grid;
+  gap: var(--space-4);
+  align-content: start;
+}
+
+.page-news {
+  min-height: 920px;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+}
+
+.news-placeholder {
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.news-placeholder h2 {
+  margin: 0 0 10px;
+  color: var(--text-primary);
+}
+
+.news-placeholder p {
+  margin: 0;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-size: 12px;
+}
 
 .section-header {
   display: flex;
@@ -646,6 +727,8 @@ body {
 
 @media (max-width: 900px) {
   .app { width: min(100% - 24px, 1200px); padding-top: var(--space-3); }
+  .view-slider-viewport,
+  .page-news { min-height: 760px; }
   .hero { flex-direction: column; }
   .meta-stack { width: 100%; }
   .meta-chip { text-align: left; }
@@ -685,6 +768,8 @@ body {
   .signals-grid,
   .prices-grid { grid-template-columns: 1fr; }
   .nav-mini { flex-wrap: wrap; }
+  .view-slider-viewport,
+  .page-news { min-height: 680px; }
 
   .modal {
     height: 96vh;

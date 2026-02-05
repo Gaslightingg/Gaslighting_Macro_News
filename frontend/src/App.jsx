@@ -549,6 +549,10 @@ const ChartModal = ({ indicator, mode, onClose }) => {
 
 
 function App() {
+  const initialView = (() => {
+    const q = new URLSearchParams(window.location.search).get("view");
+    return q === "news" ? "news" : "main";
+  })();
   const [prices, setPrices] = useState(null);
   const [signals, setSignals] = useState(null);
   const [macroCategories, setMacroCategories] = useState([]);
@@ -559,6 +563,8 @@ function App() {
   const [selectedTicker, setSelectedTicker] = useState(null);
   const [debugMode, setDebugMode] = useState(false);
   const [now, setNow] = useState(new Date());
+  const [activeView, setActiveView] = useState(initialView);
+  const touchStartXRef = useRef(null);
 
   useEffect(() => {
     let timeoutId;
@@ -612,6 +618,12 @@ function App() {
     return () => clearInterval(id);
   }, []);
 
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("view", activeView);
+    window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  }, [activeView]);
+
   const latestById = useMemo(() => {
     const map = new Map();
     macroLatest.forEach((item) => map.set(item.indicator_id, item));
@@ -636,6 +648,20 @@ function App() {
     return new Date(lastFetch.getTime() + REFRESH_INTERVAL_MS).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }, [lastFetch]);
 
+  const handleTouchStart = (event) => {
+    touchStartXRef.current = event.touches?.[0]?.clientX ?? null;
+  };
+
+  const handleTouchEnd = (event) => {
+    if (touchStartXRef.current == null) return;
+    const endX = event.changedTouches?.[0]?.clientX;
+    if (typeof endX !== "number") return;
+    const delta = endX - touchStartXRef.current;
+    if (delta < -60) setActiveView("news");
+    else if (delta > 60) setActiveView("main");
+    touchStartXRef.current = null;
+  };
+
   return (
     <div className="app">
       <header className="hero panel fade-up">
@@ -643,11 +669,21 @@ function App() {
           <p className="eyebrow">Institutional Macro Desk</p>
           <h1>Gaslighting Macro News</h1>
           <p className="subtitle">Cross-asset intelligence layer for discretionary and systematic macro decisions.</p>
-          <nav className="nav-mini">
-            <a href="#macro">Macro</a>
-            <a href="#risk">Risk</a>
-            <a href="#signals">Signals</a>
-            <a href="#prices">Prices</a>
+          <nav className="nav-mini" aria-label="Primary view switcher">
+            <button
+              type="button"
+              className={`view-switch-btn ${activeView === "main" ? "active" : ""}`}
+              onClick={() => setActiveView("main")}
+            >
+              Main
+            </button>
+            <button
+              type="button"
+              className={`view-switch-btn ${activeView === "news" ? "active" : ""}`}
+              onClick={() => setActiveView("news")}
+            >
+              News
+            </button>
           </nav>
         </div>
         <div className="meta-stack">
@@ -657,6 +693,13 @@ function App() {
         </div>
       </header>
 
+      <div
+        className={`view-slider-viewport ${activeView === "news" ? "news-active" : "main-active"}`}
+        onTouchStart={handleTouchStart}
+        onTouchEnd={handleTouchEnd}
+      >
+      <div className="view-slider-track">
+      <main className="view-page page-main">
       {error && <div className="terminal-state error fade-up">{error}</div>}
 
       <section className="section" id="prices">
@@ -798,6 +841,16 @@ function App() {
           <pre className="debug-panel">{JSON.stringify({ signals, macroLatest: macroLatest.slice(0, 5) }, null, 2)}</pre>
         </div>
       </section>
+      </main>
+
+      <section className="view-page page-news panel fade-up" aria-label="News view placeholder">
+        <div className="news-placeholder">
+          <h2>News</h2>
+          <p>News (coming soon)</p>
+        </div>
+      </section>
+      </div>
+      </div>
 
       {selectedIndicator && <ChartModal indicator={selectedIndicator} mode="macro" onClose={() => setSelectedIndicator(null)} />}
       {selectedTicker && <ChartModal indicator={selectedTicker} mode="price" onClose={() => setSelectedTicker(null)} />}
