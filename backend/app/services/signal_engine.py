@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from statistics import mean, pstdev
@@ -20,6 +21,10 @@ from ..services.macro_catalog import all_indicators, find_indicator
 from ..services.macro_series_service import get_series_payload
 from ..services.price_catalog import PRICE_TICKERS
 from ..utils.cache_db import CacheStore
+
+logger = logging.getLogger(__name__)
+
+SIGNALS_CACHE_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -126,13 +131,123 @@ class SignalEngine:
         if not force_recompute:
             cached = self.cache.get_cache(cache_key)
             if cached:
-                return [SignalCard(**{**item, "debug": {**item["debug"], "cacheStatus": "CACHED"}}) for item in cached]
+                try:
+                    cards, migrated = self._load_cached_cards(cached)
+                    if migrated:
+                        logger.info(
+                            "signals cache schema mismatch: cached=%s current=%s; recomputing",
+                            self._cached_schema_version(cached),
+                            SIGNALS_CACHE_SCHEMA_VERSION,
+                        )
+                        self._save_signals_cache(cards)
+                    return cards
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("signals cache invalid; recomputing fresh: %s", exc)
 
         factors = await self.getFactorsSnapshot({"forceRecompute": force_recompute})
         tickers = await self.ticker_provider.listTickers()
         cards = [await self.computeSignal(t, {"factors": factors, "cacheStatus": "FRESH"}) for t in tickers]
-        self.cache.set_cache(cache_key, [card.model_dump() for card in cards], self.config.ttl_seconds)
+        self._save_signals_cache(cards)
         return cards
+
+    def _save_signals_cache(self, cards: list[SignalCard]) -> None:
+        payload = {
+            "schema_version": SIGNALS_CACHE_SCHEMA_VERSION,
+            "items": [card.model_dump() for card in cards],
+        }
+        self.cache.set_cache("signals-engine:final", payload, self.config.ttl_seconds)
+
+    def _cached_schema_version(self, cached: object) -> int:
+        if isinstance(cached, dict):
+            version = cached.get("schema_version")
+            if isinstance(version, int):
+                return version
+        return 1
+
+    def _load_cached_cards(self, cached: object) -> tuple[list[SignalCard], bool]:
+        migrated = False
+        if isinstance(cached, dict):
+            version = cached.get("schema_version", 1)
+            raw_items = cached.get("items", [])
+            if not isinstance(raw_items, list):
+                raise ValueError("cached signals payload has invalid items")
+        elif isinstance(cached, list):
+            version = 1
+            raw_items = cached
+        else:
+            raise ValueError("cached signals payload has unknown type")
+
+        if version < SIGNALS_CACHE_SCHEMA_VERSION:
+            migrated = True
+            raw_items = [self._migrate_cached_item(item) for item in raw_items]
+
+        cards: list[SignalCard] = []
+        for item in raw_items:
+            card = SignalCard(**item)
+            card.debug.cacheStatus = "CACHED"
+            cards.append(card)
+        return cards, migrated
+
+    def _migrate_cached_item(self, item: dict) -> dict:
+        if not isinstance(item, dict):
+            return self._default_migrated_item("unknown")
+        debug = item.get("debug") if isinstance(item.get("debug"), dict) else {}
+        score = debug.get("score", item.get("score", 0.0))
+        try:
+            score_f = float(score)
+        except (TypeError, ValueError):
+            score_f = 0.0
+        confidence = item.get("confidence", 0)
+        try:
+            confidence_i = int(confidence)
+        except (TypeError, ValueError):
+            confidence_i = 0
+
+        directional = _directional_split(
+            score_f,
+            confidence=confidence_i,
+            k=self.config.directional_k,
+            flat_bias_threshold=self.config.flat_bias_threshold,
+        )
+        migrated = dict(item)
+        migrated["long_pct"] = int(directional["long_pct"])
+        migrated["short_pct"] = int(directional["short_pct"])
+        migrated["direction_label"] = str(directional["direction_label"])
+        migrated["bias"] = str(directional["bias"])
+        debug_payload = dict(debug)
+        debug_payload["migrated"] = True
+        debug_payload.setdefault("cacheStatus", "CACHED")
+        debug_payload.setdefault("score", round(score_f, 4))
+        debug_payload.setdefault("factorScores", {})
+        debug_payload.setdefault("missingInputs", [])
+        migrated["debug"] = debug_payload
+        migrated.setdefault("bullets", ["Insufficient data: migrated from old cache schema."])
+        migrated.setdefault("signal", "NEUTRAL")
+        migrated.setdefault("updated_at", datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
+        migrated.setdefault("ticker", "unknown")
+        return migrated
+
+    def _default_migrated_item(self, ticker: str) -> dict:
+        directional = _directional_split(0.0, confidence=0, k=self.config.directional_k, flat_bias_threshold=self.config.flat_bias_threshold)
+        return {
+            "ticker": ticker,
+            "signal": "NEUTRAL",
+            "confidence": 0,
+            "long_pct": directional["long_pct"],
+            "short_pct": directional["short_pct"],
+            "direction_label": directional["direction_label"],
+            "bias": directional["bias"],
+            "bullets": ["Insufficient data: migrated from old cache schema."],
+            "updated_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "debug": {
+                "score": 0.0,
+                "factorScores": {},
+                "missingInputs": [],
+                "cacheStatus": "CACHED",
+                "migrated": True,
+            },
+        }
+
 
     async def computeSignal(self, ticker: str, opts: dict | None = None) -> SignalCard:
         opts = opts or {}

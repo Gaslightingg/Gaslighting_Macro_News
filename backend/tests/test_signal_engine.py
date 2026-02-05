@@ -121,3 +121,35 @@ def test_directional_split_negative_score_biases_short():
     split = _directional_split(-0.5, confidence=100, k=4.0, flat_bias_threshold=5)
     assert split["short_pct"] > 50
     assert split["long_pct"] + split["short_pct"] == 100
+
+
+@pytest.mark.asyncio
+async def test_cached_v1_payload_migrates_without_crash(tmp_path):
+    cache = CacheStore(f"sqlite:///{tmp_path / 'cache.db'}")
+    cache.set_cache(
+        "signals-engine:final",
+        [
+            {
+                "ticker": "sp500",
+                "signal": "NEUTRAL",
+                "confidence": 20,
+                "bullets": ["legacy payload"],
+                "updated_at": "2026-01-01T00:00:00Z",
+                "debug": {
+                    "score": 0.1,
+                    "factorScores": {},
+                    "missingInputs": [],
+                    "cacheStatus": "CACHED",
+                },
+            }
+        ],
+        600,
+    )
+    engine = SignalEngine(FakeDataProvider({}), FakeTickerProvider(["sp500"]), cache, _default_config())
+
+    cards = await engine.computeSignals({"forceRecompute": False})
+
+    assert cards
+    assert cards[0].long_pct is not None
+    assert cards[0].short_pct is not None
+    assert cards[0].long_pct + cards[0].short_pct == 100

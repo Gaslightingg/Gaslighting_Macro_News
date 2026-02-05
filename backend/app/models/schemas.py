@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import List
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class PriceHistoryPoint(BaseModel):
@@ -155,19 +155,39 @@ class SignalDebug(BaseModel):
     factorScores: dict[str, float | None]
     missingInputs: List[str]
     cacheStatus: str
+    migrated: bool | None = None
 
 
 class SignalCard(BaseModel):
     ticker: str
     signal: str
     confidence: int
-    long_pct: int
-    short_pct: int
-    direction_label: str
-    bias: str
+    long_pct: int | None = None
+    short_pct: int | None = None
+    direction_label: str | None = None
+    bias: str | None = None
     bullets: List[str]
     updated_at: str
     debug: SignalDebug
+
+    @model_validator(mode="after")
+    def _fill_directional_defaults(self) -> "SignalCard":
+        long_pct = 50 if self.long_pct is None else int(self.long_pct)
+        short_pct = 50 if self.short_pct is None else int(self.short_pct)
+        if long_pct + short_pct != 100:
+            total = max(1, long_pct + short_pct)
+            long_pct = int(round((long_pct / total) * 100))
+            short_pct = 100 - long_pct
+        long_pct = max(0, min(100, long_pct))
+        short_pct = 100 - long_pct
+
+        self.long_pct = long_pct
+        self.short_pct = short_pct
+        if not self.direction_label:
+            self.direction_label = f"{long_pct}% long / {short_pct}% short"
+        if not self.bias:
+            self.bias = "LONG" if long_pct > 55 else "SHORT" if long_pct < 45 else "FLAT"
+        return self
 
 
 class SignalsApiResponse(BaseModel):
