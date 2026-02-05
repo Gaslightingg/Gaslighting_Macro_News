@@ -40,6 +40,15 @@ class FredClient:
                 response.raise_for_status()
                 payload = response.json()
                 return payload.get("observations", [])
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                if 400 <= status_code < 500:
+                    logger.warning("FRED returned %s for %s; skipping series", status_code, series_id)
+                    return []
+                attempt += 1
+                if attempt > retries:
+                    logger.warning("FRED request failed for %s: %s", series_id, exc)
+                    return []
             except httpx.HTTPError as exc:
                 attempt += 1
                 if attempt > retries:

@@ -170,6 +170,8 @@ async def _ensure_latest(
     meta_key = f"latest:{symbol_id}:updated_at"
     last_update = await store.get_meta(meta_key)
     if cached and _is_fresh(last_update, LATEST_TTL):
+        cached["status"] = cached.get("status") or "cached"
+        cached["quality"] = cached.get("quality") or "high"
         return cached
 
     latest = await _fetch_stooq_latest(client, stooq_symbol)
@@ -207,19 +209,39 @@ async def get_prices_payload() -> PricesResponse:
 
     return PricesResponse(
         as_of=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        tickers=[ticker for ticker in tickers if ticker],
+        tickers=tickers,
     )
 
 
-async def _build_ticker_payload(config, store: PriceHistoryStore, client: httpx.AsyncClient) -> dict | None:
-    latest = await _ensure_latest(store, client, config.id, config.stooq_symbol)
-    history = await _ensure_history(store, client, config.id, config.stooq_symbol)
-    meta = _history_meta(history)
+async def _build_ticker_payload(config, store: PriceHistoryStore, client: httpx.AsyncClient) -> dict:
+    try:
+        latest = await _ensure_latest(store, client, config.id, config.stooq_symbol)
+        history = await _ensure_history(store, client, config.id, config.stooq_symbol)
+        meta = _history_meta(history)
 
-    spark_points = history[-SPARKLINE_POINTS:] if history else []
-    history_points = [PriceHistoryPoint(date=p.date, value=p.value) for p in spark_points]
+        spark_points = history[-SPARKLINE_POINTS:] if history else []
+        history_points = [PriceHistoryPoint(date=p.date, value=p.value) for p in spark_points]
 
-    if latest is None and not history:
+        if latest is None and not history:
+            return normalize_price_ticker(
+                {
+                    "id": config.id,
+                    "symbol": config.symbol,
+                    "name": config.name,
+                    "asset_class": config.asset_class,
+                    "unit": config.unit,
+                    "history_points": history_points,
+                    "history_meta": meta,
+                },
+                now=datetime.utcnow(),
+                source=None,
+                status="error",
+                error="No price data available",
+            )
+
+        # status is required by PriceTicker schema; force a safe non-null default.
+        safe_status = (latest or {}).get("status") or "cached"
+
         return normalize_price_ticker(
             {
                 "id": config.id,
@@ -227,34 +249,40 @@ async def _build_ticker_payload(config, store: PriceHistoryStore, client: httpx.
                 "name": config.name,
                 "asset_class": config.asset_class,
                 "unit": config.unit,
+                "value": latest.get("value") if latest else None,
+                "change": latest.get("change") if latest else None,
+                "change_pct": latest.get("change_pct") if latest else None,
+                "last_updated": latest.get("last_updated") if latest else None,
                 "history_points": history_points,
                 "history_meta": meta,
             },
             now=datetime.utcnow(),
-            source=None,
-            status="unavailable",
-            error="No price data available",
+            source=latest.get("source") if latest else None,
+            status=safe_status,
+            error=None,
         )
-
-    return normalize_price_ticker(
-        {
-            "id": config.id,
-            "symbol": config.symbol,
-            "name": config.name,
-            "asset_class": config.asset_class,
-            "unit": config.unit,
-            "value": latest.get("value") if latest else None,
-            "change": latest.get("change") if latest else None,
-            "change_pct": latest.get("change_pct") if latest else None,
-            "last_updated": latest.get("last_updated") if latest else None,
-            "history_points": history_points,
-            "history_meta": meta,
-        },
-        now=datetime.utcnow(),
-        source=latest.get("source") if latest else None,
-        status=latest.get("status") if latest else "stale",
-        error=None,
-    )
+    except Exception as exc:
+        logger.exception("Failed to build ticker payload for %s", config.id)
+        return normalize_price_ticker(
+            {
+                "id": config.id,
+                "symbol": config.symbol,
+                "name": config.name,
+                "asset_class": config.asset_class,
+                "unit": config.unit,
+                "history_points": [],
+                "history_meta": PriceHistoryMeta(
+                    data_start=None,
+                    data_end=None,
+                    interval="1d",
+                    points_count=0,
+                ),
+            },
+            now=datetime.utcnow(),
+            source=None,
+            status="error",
+            error=f"Ticker fetch failed: {exc}",
+        )
 
 
 async def get_price_history_payload(symbol: str, range_key: str) -> PriceHistoryResponse:
