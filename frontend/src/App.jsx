@@ -27,6 +27,8 @@ const formatPointDate = (timestamp) => {
   return new Date(timestamp).toISOString().slice(0, 10);
 };
 
+const isAbortError = (err) => err?.name === "AbortError" || String(err?.message ?? "").toLowerCase().includes("aborted");
+
 const fetchJson = async (url, signal) => {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
@@ -244,6 +246,8 @@ const ChartModal = ({ indicator, mode, onClose }) => {
   const [chartDims, setChartDims] = useState({ width: 0, height: 0 });
   const lastGoodPointsRef = useRef([]);
   const renderCountRef = useRef(0);
+  const requestSeqRef = useRef(0);
+  const activeRequestRef = useRef(null);
 
   const options = mode === "price" ? PRICE_RANGE_OPTIONS : RANGE_OPTIONS;
 
@@ -324,24 +328,64 @@ const ChartModal = ({ indicator, mode, onClose }) => {
   useEffect(() => {
     if (!indicator) return;
     const load = async () => {
+      requestSeqRef.current += 1;
+      const requestId = requestSeqRef.current;
+      const controller = new AbortController();
+      const requestUrl =
+        mode === "price"
+          ? `${API_BASE}/api/prices/history?symbol=${indicator.id}&range=${range}`
+          : `${API_BASE}/api/macro/series/${indicator.id}?range=${range}`;
+
+      if (activeRequestRef.current) {
+        if (IS_DEV) {
+          console.debug("[chart-modal] abort previous request", {
+            requestId: activeRequestRef.current.id,
+            reason: "superseded",
+            url: activeRequestRef.current.url,
+          });
+        }
+        activeRequestRef.current.controller.abort("superseded");
+      }
+
+      activeRequestRef.current = { id: requestId, controller, url: requestUrl };
+      if (IS_DEV) console.debug("[chart-modal] request start", { requestId, url: requestUrl });
+
       setLoading(true);
       setError(null);
       setChartReady(false);
       if (modalRef.current) modalRef.current.scrollTop = 0;
       try {
-        const endpoint =
-          mode === "price"
-            ? `${API_BASE}/api/prices/history?symbol=${indicator.id}&range=${range}`
-            : `${API_BASE}/api/macro/series/${indicator.id}?range=${range}`;
-        const data = await fetchJson(endpoint);
+        const response = await fetch(requestUrl, { signal: controller.signal });
+        if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+        const data = await response.json();
+        if (requestId !== requestSeqRef.current) {
+          if (IS_DEV) console.debug("[chart-modal] stale response ignored", { requestId, url: requestUrl });
+          return;
+        }
         if (IS_DEV && !Array.isArray(data?.points)) {
-          console.debug("[chart-modal] fetched series without points array", { endpoint, payload: data });
+          console.debug("[chart-modal] fetched series without points array", { requestId, url: requestUrl, payload: data });
         }
         setSeriesData(data);
       } catch (err) {
+        if (isAbortError(err)) {
+          if (IS_DEV) {
+            console.debug("[chart-modal] request aborted", {
+              requestId,
+              url: requestUrl,
+              reason: controller.signal.reason ?? "abort",
+            });
+          }
+          return;
+        }
+        if (requestId !== requestSeqRef.current) {
+          if (IS_DEV) console.debug("[chart-modal] stale request error ignored", { requestId, url: requestUrl });
+          return;
+        }
         setError(err instanceof Error ? err.message : "Failed to load chart.");
       } finally {
-        setLoading(false);
+        if (requestId === requestSeqRef.current) {
+          setLoading(false);
+        }
         window.requestAnimationFrame(() => {
           window.requestAnimationFrame(() => {
             setChartReady(true);
@@ -350,6 +394,19 @@ const ChartModal = ({ indicator, mode, onClose }) => {
       }
     };
     load();
+
+    return () => {
+      if (activeRequestRef.current?.id === requestSeqRef.current) {
+        if (IS_DEV) {
+          console.debug("[chart-modal] cleanup abort", {
+            requestId: activeRequestRef.current.id,
+            reason: "effect cleanup",
+            url: activeRequestRef.current.url,
+          });
+        }
+        activeRequestRef.current.controller.abort("effect cleanup");
+      }
+    };
   }, [indicator, mode, range]);
 
   if (!indicator) return null;
