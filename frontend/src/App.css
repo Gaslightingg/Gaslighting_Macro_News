@@ -332,6 +332,38 @@ body {
 .sparkline.negative path { stroke: var(--short); filter: drop-shadow(0 0 8px rgba(255, 107, 126, 0.33)); }
 .sparkline line { stroke: rgba(152, 167, 194, 0.35); }
 
+.sparkline.large {
+  width: 100%;
+  height: 100%;
+}
+
+.sparkline.large path {
+  stroke-width: 3.2;
+  animation: chartDraw 520ms ease-out both;
+}
+
+.sparkline.large .spark-area {
+  fill: url(#sparkArea);
+  stroke: none;
+  filter: none;
+  animation: chartFade 420ms ease-out both;
+}
+
+.sparkline.large .spark-grid line {
+  stroke: rgba(140, 157, 187, 0.22);
+  stroke-width: 1;
+}
+
+@keyframes chartDraw {
+  from { opacity: 0; stroke-dasharray: 360; stroke-dashoffset: 360; }
+  to { opacity: 1; stroke-dasharray: 360; stroke-dashoffset: 0; }
+}
+
+@keyframes chartFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
 .chart-btn,
 .range-btn,
 .icon-btn {
@@ -362,21 +394,90 @@ body {
 
 .modal {
   width: min(920px, 100%);
-  max-height: 90vh;
-  overflow: auto;
-  padding: var(--space-3);
+  height: min(92vh, 1020px);
+  min-height: 760px;
+  overflow: hidden;
+  padding: 20px 20px 18px;
   display: grid;
-  gap: var(--space-2);
+  grid-template-rows: auto minmax(0, 1fr) auto minmax(0, 0.58fr);
+  gap: 12px;
   background: var(--panel-strong);
 }
 
-.modal-header { display: flex; justify-content: space-between; gap: var(--space-2); }
-.modal-header h3 { margin: 0; }
-.modal-controls { display: flex; gap: 8px; flex-wrap: wrap; }
-.range-btn.active { border-color: var(--panel-border-hover); color: var(--text-primary); }
-.chart-shell { padding: var(--space-2); }
+.modal-header {
+  display: grid;
+  grid-template-columns: minmax(160px, auto) minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+}
 
-.modal-table { display: grid; gap: 6px; }
+.modal-title-wrap h3 { margin: 0; line-height: 1.1; }
+.modal-title-wrap .muted { margin-top: 4px; font-size: 11px; }
+
+.modal-controls {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.range-btn { padding: 5px 10px; font-size: 10px; }
+
+.modal-close-fixed {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.range-btn.active { border-color: var(--panel-border-hover); color: var(--text-primary); }
+
+.chart-shell {
+  padding: 14px;
+  width: 100%;
+  height: 100%;
+  min-height: 420px;
+  max-height: none;
+}
+
+.chart-fixed-height {
+  display: grid;
+  align-items: stretch;
+}
+
+.chart-fade-in,
+.chart-skeleton {
+  width: 100%;
+  height: 100%;
+  min-height: inherit;
+}
+
+.chart-fade-in {
+  animation: chartFade 220ms ease-out both;
+}
+
+.chart-skeleton {
+  border-radius: var(--radius-md);
+  background:
+    linear-gradient(90deg, rgba(133, 151, 188, 0.08), rgba(133, 151, 188, 0.2), rgba(133, 151, 188, 0.08));
+  background-size: 200% 100%;
+  animation: shimmer 1.2s linear infinite;
+}
+
+.modal-divider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(122, 141, 176, 0.42), transparent);
+}
+
+.modal-table {
+  display: grid;
+  gap: 6px;
+  overflow: auto;
+  min-height: 0;
+  padding-right: 4px;
+}
 .modal-table-header,
 .modal-table-row {
   display: grid;
@@ -450,6 +551,12 @@ body {
   .risk-grid,
   .prices-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .signals-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+  .modal {
+    height: min(94vh, 980px);
+    min-height: 700px;
+    grid-template-rows: auto minmax(0, 1fr) auto minmax(0, 0.62fr);
+  }
 }
 
 @media (max-width: 900px) {
@@ -465,6 +572,26 @@ body {
   .table-header span:nth-child(5),
   .table-header span:nth-child(6),
   .table-header span:nth-child(7) { display: none; }
+
+  .modal {
+    width: min(96vw, 920px);
+    height: min(95vh, 900px);
+    min-height: 680px;
+    grid-template-rows: auto minmax(0, 1fr) auto minmax(0, 0.7fr);
+    padding: 16px;
+  }
+
+  .modal-header {
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      "title close"
+      "controls controls";
+    gap: 8px;
+  }
+
+  .modal-title-wrap { grid-area: title; }
+  .modal-controls { grid-area: controls; justify-content: flex-start; }
+  .modal-close-fixed { grid-area: close; justify-self: end; }
 }
 
 @media (max-width: 640px) {
@@ -473,4 +600,25 @@ body {
   .signals-grid,
   .prices-grid { grid-template-columns: 1fr; }
   .nav-mini { flex-wrap: wrap; }
+
+  .modal {
+    height: 96vh;
+    min-height: 560px;
+    grid-template-rows: auto minmax(360px, 1fr) auto minmax(0, 0.58fr);
+    gap: 10px;
+  }
+
+  .chart-shell { min-height: 360px; padding: 10px; }
+}
+
+@media (min-width: 1440px) {
+  .modal {
+    width: min(1120px, 100%);
+    height: min(92vh, 1100px);
+    min-height: 860px;
+  }
+
+  .chart-shell {
+    min-height: 520px;
+  }
 }

@@ -67,12 +67,37 @@ const buildSparklinePath = (values, width, height) => {
     .join(" ");
 };
 
-const Sparkline = ({ values, tone }) => {
+const buildSparklineAreaPath = (values, width, height) => {
+  const linePath = buildSparklinePath(values, width, height);
+  if (!linePath) return "";
+  return `${linePath} L ${width} ${height} L 0 ${height} Z`;
+};
+
+const Sparkline = ({ values, tone, variant = "compact" }) => {
+  const isLarge = variant === "large";
   const width = 120;
-  const height = 34;
+  const height = isLarge ? 360 : 34;
   const path = buildSparklinePath(values, width, height);
+  const areaPath = isLarge ? buildSparklineAreaPath(values, width, height) : "";
   return (
-    <svg className={`sparkline ${tone ?? "flat"}`} width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
+    <svg className={`sparkline ${tone ?? "flat"} ${isLarge ? "large" : "compact"}`} width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
+      {isLarge ? (
+        <>
+          <defs>
+            <linearGradient id="sparkArea" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="rgba(213, 165, 75, 0.2)" />
+              <stop offset="100%" stopColor="rgba(213, 165, 75, 0.02)" />
+            </linearGradient>
+          </defs>
+          <g className="spark-grid">
+            <line x1="0" y1={height * 0.2} x2={width} y2={height * 0.2} />
+            <line x1="0" y1={height * 0.4} x2={width} y2={height * 0.4} />
+            <line x1="0" y1={height * 0.6} x2={width} y2={height * 0.6} />
+            <line x1="0" y1={height * 0.8} x2={width} y2={height * 0.8} />
+          </g>
+        </>
+      ) : null}
+      {areaPath ? <path d={areaPath} className="spark-area" /> : null}
       {path ? <path d={path} fill="none" /> : <line x1="0" y1="17" x2={width} y2="17" />}
     </svg>
   );
@@ -148,41 +173,42 @@ const ChartModal = ({ indicator, mode, onClose }) => {
     >
       <div ref={modalRef} className="modal panel modal-enter" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          <div>
+          <div className="modal-title-wrap">
             <h3>{indicator.symbol ?? indicator.name ?? indicator.id}</h3>
             <p className="muted">
               {seriesData?.source ?? indicator.source ?? "Data"} · {range.toUpperCase()}
             </p>
+          </div>
+          <div className="modal-controls" role="tablist" aria-label="Chart range">
+            {options.map((option) => (
+              <button
+                key={option}
+                type="button"
+                className={`range-btn ${range === option ? "active" : ""}`}
+                onClick={() => setRange(option)}
+              >
+                {option.toUpperCase()}
+              </button>
+            ))}
           </div>
           <button className="icon-btn modal-close-fixed" type="button" onClick={onClose}>
             ✕
           </button>
         </div>
 
-        <div className="modal-controls">
-          {options.map((option) => (
-            <button
-              key={option}
-              type="button"
-              className={`range-btn ${range === option ? "active" : ""}`}
-              onClick={() => setRange(option)}
-            >
-              {option.toUpperCase()}
-            </button>
-          ))}
-        </div>
-
-        <div className="chart-shell panel chart-fixed-height">
+        <div className="chart-shell panel chart-fixed-height" title="Chart">
           {loading ? (
             <div className="chart-skeleton" />
           ) : error ? (
             <div className="terminal-state error">{error}</div>
           ) : (
             <div className="chart-fade-in">
-              <Sparkline values={values} tone="flat" />
+              <Sparkline values={values} tone="flat" variant="large" />
             </div>
           )}
         </div>
+
+        <div className="modal-divider" aria-hidden="true" />
 
         <div className="modal-table">
           <div className="modal-table-header">
