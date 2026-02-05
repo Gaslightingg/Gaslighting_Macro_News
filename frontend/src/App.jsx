@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 
 const resolveApiBase = () => {
@@ -85,13 +85,39 @@ const ChartModal = ({ indicator, mode, onClose }) => {
   const [seriesData, setSeriesData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const modalRef = useRef(null);
+  const closeEnabledRef = useRef(false);
 
   const options = mode === "price" ? PRICE_RANGE_OPTIONS : RANGE_OPTIONS;
 
   useEffect(() => {
     if (!indicator) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    if (modalRef.current) modalRef.current.scrollTop = 0;
+    closeEnabledRef.current = false;
+    const timer = window.setTimeout(() => {
+      closeEnabledRef.current = true;
+    }, 180);
+
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [indicator, onClose]);
+
+  useEffect(() => {
+    if (!indicator) return;
     const load = async () => {
       setLoading(true);
+      setError(null);
+      if (modalRef.current) modalRef.current.scrollTop = 0;
       try {
         const endpoint =
           mode === "price"
@@ -99,7 +125,6 @@ const ChartModal = ({ indicator, mode, onClose }) => {
             : `${API_BASE}/api/macro/series/${indicator.id}?range=${range}`;
         const data = await fetchJson(endpoint);
         setSeriesData(data);
-        setError(null);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load chart.");
       } finally {
@@ -111,18 +136,27 @@ const ChartModal = ({ indicator, mode, onClose }) => {
 
   if (!indicator) return null;
 
-  const values = seriesData?.points?.map((p) => p.value) ?? [];
+  const values = seriesData?.points?.map((pt) => pt.value) ?? [];
   const rows = seriesData?.points?.slice(-30).reverse() ?? [];
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal panel" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="modal-backdrop modal-enter"
+      onClick={() => {
+        if (closeEnabledRef.current) onClose();
+      }}
+    >
+      <div ref={modalRef} className="modal panel modal-enter" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <div>
             <h3>{indicator.symbol ?? indicator.name ?? indicator.id}</h3>
-            <p className="muted">{seriesData?.source ?? indicator.source ?? "Data"} · {range.toUpperCase()}</p>
+            <p className="muted">
+              {seriesData?.source ?? indicator.source ?? "Data"} · {range.toUpperCase()}
+            </p>
           </div>
-          <button className="icon-btn" type="button" onClick={onClose}>✕</button>
+          <button className="icon-btn modal-close-fixed" type="button" onClick={onClose}>
+            ✕
+          </button>
         </div>
 
         <div className="modal-controls">
@@ -138,26 +172,35 @@ const ChartModal = ({ indicator, mode, onClose }) => {
           ))}
         </div>
 
-        {loading && <div className="terminal-state">Loading series…</div>}
-        {error && <div className="terminal-state error">{error}</div>}
-
-        {!loading && !error && (
-          <>
-            <div className="chart-shell panel">
+        <div className="chart-shell panel chart-fixed-height">
+          {loading ? (
+            <div className="chart-skeleton" />
+          ) : error ? (
+            <div className="terminal-state error">{error}</div>
+          ) : (
+            <div className="chart-fade-in">
               <Sparkline values={values} tone="flat" />
             </div>
-            <div className="modal-table">
-              <div className="modal-table-header"><span>Date</span><span>Value</span></div>
-              {rows.map((row) => (
-                <div key={row.date} className="modal-table-row"><span>{row.date}</span><span>{formatValue(row.value, seriesData?.unit)}</span></div>
-              ))}
+          )}
+        </div>
+
+        <div className="modal-table">
+          <div className="modal-table-header">
+            <span>Date</span>
+            <span>Value</span>
+          </div>
+          {rows.map((row) => (
+            <div key={row.date} className="modal-table-row">
+              <span>{row.date}</span>
+              <span>{formatValue(row.value, seriesData?.unit)}</span>
             </div>
-          </>
-        )}
+          ))}
+        </div>
       </div>
     </div>
   );
 };
+
 
 function App() {
   const [prices, setPrices] = useState(null);
@@ -270,6 +313,37 @@ function App() {
 
       {error && <div className="terminal-state error fade-up">{error}</div>}
 
+      <section className="section" id="prices">
+        <div className="section-header"><h2>Prices</h2><span className="section-meta">Spot + history</span></div>
+        <div className="grid prices-grid">
+          {prices?.tickers?.length
+            ? prices.tickers.map((ticker) => {
+                const tone = typeof ticker.change === "number" && ticker.change < 0 ? "negative" : "positive";
+                return (
+                  <article key={ticker.id} className="panel card fade-up">
+                    <div className="card-row">
+                      <span className="symbol">{ticker.symbol ?? ticker.name}</span>
+                      <span className="price">{formatValue(ticker.value, ticker.unit)}</span>
+                    </div>
+                    <p className={`change ${tone}`}>{typeof ticker.change === "number" ? formatChange(ticker.change) : "—"}</p>
+                    <Sparkline values={ticker.history_points?.map((p) => p.value) ?? []} tone={tone} />
+                    <span className="ticker-meta">
+                      {ticker.history_meta?.data_start ? `Data since ${ticker.history_meta.data_start}` : "Data availability pending"}
+                    </span>
+                    <div className="card-row">
+                      <span className={`status-badge ${ticker.status}`}>{ticker.status}</span>
+                      <button type="button" className="chart-btn" onClick={() => setSelectedTicker(ticker)} disabled={ticker.status === "unavailable"}>
+                        Chart
+                      </button>
+                    </div>
+                  </article>
+                );
+              })
+            : Array.from({ length: 6 }).map((_, i) => <SkeletonCard key={i} />)}
+        </div>
+      </section>
+
+
       <section className="section" id="macro">
         <div className="section-header">
           <h2>Macro</h2>
@@ -368,35 +442,7 @@ function App() {
         <p className="disclaimer">{signals?.errors?.length ? `Signals warnings: ${signals.errors.join("; ")}` : "Not financial advice"}</p>
       </section>
 
-      <section className="section" id="prices">
-        <div className="section-header"><h2>Prices</h2><span className="section-meta">Spot + history</span></div>
-        <div className="grid prices-grid">
-          {prices?.tickers?.length
-            ? prices.tickers.map((ticker) => {
-                const tone = typeof ticker.change === "number" && ticker.change < 0 ? "negative" : "positive";
-                return (
-                  <article key={ticker.id} className="panel card fade-up">
-                    <div className="card-row">
-                      <span className="symbol">{ticker.symbol ?? ticker.name}</span>
-                      <span className="price">{formatValue(ticker.value, ticker.unit)}</span>
-                    </div>
-                    <p className={`change ${tone}`}>{typeof ticker.change === "number" ? formatChange(ticker.change) : "—"}</p>
-                    <Sparkline values={ticker.history_points?.map((p) => p.value) ?? []} tone={tone} />
-                    <span className="ticker-meta">
-                      {ticker.history_meta?.data_start ? `Data since ${ticker.history_meta.data_start}` : "Data availability pending"}
-                    </span>
-                    <div className="card-row">
-                      <span className={`status-badge ${ticker.status}`}>{ticker.status}</span>
-                      <button type="button" className="chart-btn" onClick={() => setSelectedTicker(ticker)} disabled={ticker.status === "unavailable"}>
-                        Chart
-                      </button>
-                    </div>
-                  </article>
-                );
-              })
-            : Array.from({ length: 6 }).map((_, i) => <SkeletonCard key={i} />)}
-        </div>
-      </section>
+      
 
       <section className="section debug-wrap">
         <button type="button" className="chart-btn" onClick={() => setDebugMode((v) => !v)}>
