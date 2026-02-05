@@ -10,7 +10,9 @@ from ..models.schemas import (
     MacroSeriesResponse,
     PriceHistoryResponse,
     PricesResponse,
-    SignalsResponse,
+    FactorsSnapshot,
+    RecomputeResponse,
+    SignalCard,
 )
 from ..services.macro_series_service import (
     clear_cache,
@@ -20,7 +22,12 @@ from ..services.macro_series_service import (
 )
 from ..services.macro_service import get_macro_payload
 from ..services.price_service import get_price_history_payload, get_prices_payload
-from ..services.signal_service import get_signals_payload
+from ..services.signal_service import (
+    get_factors_payload,
+    get_signal_payload,
+    get_signals_payload,
+    recompute_signals_payload,
+)
 
 router = APIRouter(prefix="/api")
 
@@ -80,6 +87,21 @@ async def macro_series_query(indicator: str, range: str = "10y") -> MacroSeriesR
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.get("/signals", response_model=SignalsResponse)
-async def signals() -> SignalsResponse:
+@router.get("/signals", response_model=list[SignalCard])
+async def signals() -> list[SignalCard]:
     return await get_signals_payload()
+
+
+@router.get("/signals/{ticker}", response_model=SignalCard)
+async def signal_by_ticker(ticker: str) -> SignalCard:
+    return await get_signal_payload(ticker)
+
+
+@router.get("/macro/factors", response_model=FactorsSnapshot)
+async def macro_factors() -> FactorsSnapshot:
+    return await get_factors_payload()
+
+
+@router.post("/signals/recompute", response_model=RecomputeResponse)
+async def recompute_signals() -> RecomputeResponse:
+    return await recompute_signals_payload()

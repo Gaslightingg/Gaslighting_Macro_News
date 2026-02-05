@@ -1,34 +1,45 @@
 from __future__ import annotations
 
-import asyncio
+from datetime import datetime
 
-from ..analytics import build_signals
-from ..models.schemas import SignalsResponse
-from ..providers import MarketDataProvider, get_provider
+from ..models.schemas import FactorsSnapshot, RecomputeResponse, SignalCard
+from ..services.signal_engine import MacroDataProvider, SignalEngine, SiteTickerProvider
 from ..utils.cache_db import CacheStore
 from ..utils.settings import get_settings
-from .macro_service import get_macro_payload
-from .price_service import get_prices_payload
+
+_engine_cache: SignalEngine | None = None
 
 
-async def get_signals_payload(provider: MarketDataProvider | None = None) -> SignalsResponse:
+def _get_engine() -> SignalEngine:
+    global _engine_cache
+    if _engine_cache is not None:
+        return _engine_cache
     settings = get_settings()
-    cache = CacheStore(settings.cache_db_url)
-    cache_key = "signals:latest"
-    cached = cache.get_cache(cache_key)
-    if cached:
-        return SignalsResponse(**cached)
+    _engine_cache = SignalEngine(
+        data_provider=MacroDataProvider(),
+        ticker_provider=SiteTickerProvider(),
+        cache=CacheStore(settings.cache_db_url),
+    )
+    return _engine_cache
 
-    provider = provider or get_provider()
-    macro, prices = await asyncio.gather(
-        get_macro_payload(provider),
-        get_prices_payload(),
-    )
-    tickers = [item.id for item in prices.tickers]
-    response = SignalsResponse(
-        as_of=macro.as_of,
-        disclaimer="Not financial advice",
-        signals=build_signals(macro.series, tickers),
-    )
-    cache.set_cache(cache_key, response.model_dump(), settings.cache_ttl_signals)
-    return response
+
+async def get_signals_payload(force_recompute: bool = False) -> list[SignalCard]:
+    engine = _get_engine()
+    return await engine.computeSignals({"forceRecompute": force_recompute})
+
+
+async def get_signal_payload(ticker: str, force_recompute: bool = False) -> SignalCard:
+    engine = _get_engine()
+    return await engine.computeSignal(ticker, {"forceRecompute": force_recompute})
+
+
+async def get_factors_payload(force_recompute: bool = False) -> FactorsSnapshot:
+    engine = _get_engine()
+    return await engine.getFactorsSnapshot({"forceRecompute": force_recompute})
+
+
+async def recompute_signals_payload() -> RecomputeResponse:
+    engine = _get_engine()
+    signals = await engine.computeSignals({"forceRecompute": True})
+    updated_at = signals[0].updated_at if signals else datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    return RecomputeResponse(ok=True, updated_at=updated_at)

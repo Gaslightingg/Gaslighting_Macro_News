@@ -131,6 +131,47 @@ class MacroSeriesResponse(BaseModel):
     error: str | None = None
 
 
+class FactorContributor(BaseModel):
+    indicator: str
+    contribution: float
+    zscore: float
+    delta: float
+
+
+class FactorSnapshot(BaseModel):
+    score: float | None
+    contributors: List[FactorContributor]
+    coverage: float
+
+
+class FactorsSnapshot(BaseModel):
+    updated_at: str
+    factors: dict[str, FactorSnapshot]
+    cacheStatus: str
+
+
+class SignalDebug(BaseModel):
+    score: float
+    factorScores: dict[str, float | None]
+    missingInputs: List[str]
+    cacheStatus: str
+
+
+class SignalCard(BaseModel):
+    ticker: str
+    signal: str
+    confidence: int
+    bullets: List[str]
+    updated_at: str
+    debug: SignalDebug
+
+
+class RecomputeResponse(BaseModel):
+    ok: bool
+    updated_at: str
+
+
+# Backward-compatible legacy signal schema (kept for internal imports/tests).
 class SignalItem(BaseModel):
     ticker: str
     direction: str
