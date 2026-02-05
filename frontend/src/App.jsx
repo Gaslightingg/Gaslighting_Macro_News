@@ -473,8 +473,6 @@ const ChartModal = ({ indicator, mode, onClose }) => {
           )}
         </div>
 
-        <div className="modal-divider" aria-hidden="true" />
-
         <div className="modal-table">
           <div className="modal-table-header">
             <span>Date</span>

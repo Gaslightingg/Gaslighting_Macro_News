@@ -434,8 +434,8 @@ body {
   min-height: 760px;
   overflow: hidden;
   padding: 20px 20px 18px;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto minmax(0, 0.58fr);
+  display: flex;
+  flex-direction: column;
   gap: 12px;
   background: var(--panel-strong);
 }
@@ -487,6 +487,9 @@ body {
   position: relative;
   z-index: 1;
   overflow: hidden;
+  flex: 0 0 auto;
+  padding-bottom: 36px;
+  border-bottom: 1px solid rgba(122, 141, 176, 0.36);
 }
 
 .chart-fixed-height {
@@ -554,10 +557,12 @@ body {
   display: grid;
   gap: 6px;
   overflow: auto;
-  min-height: 0;
+  min-height: 170px;
+  max-height: calc(100% - 620px);
   padding-right: 4px;
   position: relative;
   z-index: 1;
+  flex: 1 1 auto;
 }
 .modal-table-header,
 .modal-table-row {
@@ -636,7 +641,6 @@ body {
   .modal {
     height: min(94vh, 980px);
     min-height: 700px;
-    grid-template-rows: auto minmax(0, 1fr) auto minmax(0, 0.62fr);
   }
 }
 
@@ -658,7 +662,6 @@ body {
     width: min(96vw, 920px);
     height: min(95vh, 900px);
     min-height: 680px;
-    grid-template-rows: auto minmax(0, 1fr) auto minmax(0, 0.7fr);
     padding: 16px;
   }
 
@@ -686,12 +689,12 @@ body {
   .modal {
     height: 96vh;
     min-height: 560px;
-    grid-template-rows: auto minmax(360px, 1fr) auto minmax(0, 0.58fr);
     gap: 10px;
   }
 
   .chart-shell { min-height: 360px; padding: 10px; }
-  .chart-shell { height: 360px; }
+  .chart-shell { height: 360px; padding-bottom: 28px; }
+  .modal-table { max-height: calc(100% - 470px); }
 }
 
 @media (min-width: 1440px) {
