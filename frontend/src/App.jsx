@@ -514,22 +514,26 @@ function App() {
         </div>
         <div className="grid signals">
           {signals?.signals?.map((signal) => {
-            const direction = signal.signal ?? signal.direction ?? "NEUTRAL";
             const confidencePct =
               typeof signal.confidence === "number"
                 ? signal.confidence > 1
                   ? signal.confidence
                   : signal.confidence * 100
                 : 0;
+            const longPct = typeof signal.long_pct === "number" ? signal.long_pct : 50;
+            const shortPct = typeof signal.short_pct === "number" ? signal.short_pct : 50;
+            const directionLabel =
+              signal.direction_label ?? `${longPct}% long / ${shortPct}% short`;
+            const bias =
+              signal.bias ?? (longPct > 55 ? "LONG" : shortPct > 55 ? "SHORT" : "FLAT");
             const bullets = signal.bullets ?? signal.reasons ?? ["Insufficient data"];
             return (
               <article key={signal.ticker} className="card">
                 <div className="card-row">
                   <p className="label">{signal.ticker}</p>
-                  <span className={`status ${direction?.toLowerCase()}`}>
-                    {direction}
-                  </span>
+                  <span className={`status ${bias?.toLowerCase()}`}>{bias}</span>
                 </div>
+                <p className="signal-confidence">{directionLabel}</p>
                 <p className="signal-confidence">Confidence: {Math.round(confidencePct)}%</p>
                 <ul className="signal-reasons">
                   {bullets.map((reason) => (

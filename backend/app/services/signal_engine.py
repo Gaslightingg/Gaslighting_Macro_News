@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from statistics import mean, pstdev
@@ -29,6 +30,8 @@ class EngineConfig:
     rolling_years: int = 3
     default_interval_days: int = 1
     ttl_seconds: int = 12 * 3600
+    directional_k: float = 4.0
+    flat_bias_threshold: int = 5
     delta_by_frequency: dict[str, int] | None = None
     indicator_polarity: dict[str, int] | None = None
     factor_definitions: dict[str, list[tuple[str, float]]] | None = None
@@ -167,11 +170,22 @@ class SignalEngine:
         elif ticker_score <= -self.config.signal_threshold:
             signal = "BEARISH"
 
+        directional = _directional_split(
+            ticker_score,
+            confidence=confidence,
+            k=self.config.directional_k,
+            flat_bias_threshold=self.config.flat_bias_threshold,
+        )
         bullets = _build_bullets(top_contributors, data_coverage)
+        bullets.insert(0, f"Debug: score={ticker_score:+.3f}, p_long_raw={directional['p_long_raw']:.3f}, p_long_adj={directional['p_long_adj']:.3f}, k={self.config.directional_k:.2f}")
         return SignalCard(
             ticker=ticker,
             signal=signal,
             confidence=confidence,
+            long_pct=directional["long_pct"],
+            short_pct=directional["short_pct"],
+            direction_label=directional["direction_label"],
+            bias=directional["bias"],
             bullets=bullets,
             updated_at=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
             debug=SignalDebug(
@@ -351,6 +365,27 @@ def _agreement(contributions: list[float]) -> float:
     var = pstdev(contributions) ** 2
     return _clamp(1 - _clamp(var, 0, 1), 0, 1)
 
+
+
+def _directional_split(score: float, confidence: int, k: float, flat_bias_threshold: int) -> dict[str, float | int | str]:
+    p_long_raw = 1.0 / (1.0 + math.exp(-k * score))
+    strength = _clamp(confidence / 100.0, 0.0, 1.0)
+    p_long_adj = 0.5 + (p_long_raw - 0.5) * strength
+    long_pct = int(round(_clamp(p_long_adj, 0.0, 1.0) * 100))
+    short_pct = 100 - long_pct
+    bias = "FLAT"
+    if long_pct >= 50 + flat_bias_threshold:
+        bias = "LONG"
+    elif long_pct <= 50 - flat_bias_threshold:
+        bias = "SHORT"
+    return {
+        "p_long_raw": p_long_raw,
+        "p_long_adj": p_long_adj,
+        "long_pct": long_pct,
+        "short_pct": short_pct,
+        "direction_label": f"{long_pct}% long / {short_pct}% short",
+        "bias": bias,
+    }
 
 def _build_bullets(top_contributors: list[tuple[float, str, FactorContributor, float]], data_coverage: float) -> list[str]:
     bullets: list[str] = []

@@ -161,6 +161,10 @@ class SignalCard(BaseModel):
     ticker: str
     signal: str
     confidence: int
+    long_pct: int
+    short_pct: int
+    direction_label: str
+    bias: str
     bullets: List[str]
     updated_at: str
     debug: SignalDebug

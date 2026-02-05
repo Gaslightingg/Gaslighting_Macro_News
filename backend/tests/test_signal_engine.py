@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from app.services.signal_engine import SignalEngine, _agreement, _build_bullets, _default_config
+from app.services.signal_engine import SignalEngine, _agreement, _build_bullets, _default_config, _directional_split
 from app.utils.cache_db import CacheStore
 
 
@@ -44,9 +44,9 @@ async def test_normalization_and_zscore_pipeline():
 
     normalized = await engine._normalized_indicator("unemployment", force_recompute=True)
 
-    assert normalized is not None
-    assert "zscore" in normalized
-    assert -1 <= normalized["normalizedScore"] <= 1
+    assert normalized["data"] is not None
+    assert "zscore" in normalized["data"]
+    assert -1 <= normalized["data"]["normalizedScore"] <= 1
 
 
 @pytest.mark.asyncio
@@ -96,3 +96,28 @@ def test_bullet_generation_is_deterministic():
 
 def test_agreement_reduces_on_conflict():
     assert _agreement([0.4, 0.4, 0.4]) > _agreement([0.8, -0.8, 0.1])
+
+
+def test_directional_split_score_zero_is_balanced():
+    split = _directional_split(0.0, confidence=100, k=4.0, flat_bias_threshold=5)
+    assert split["long_pct"] == 50
+    assert split["short_pct"] == 50
+    assert split["long_pct"] + split["short_pct"] == 100
+
+
+def test_directional_split_positive_score_confident():
+    split = _directional_split(0.25, confidence=100, k=4.0, flat_bias_threshold=5)
+    assert 60 <= split["long_pct"] <= 65
+    assert split["short_pct"] == 100 - split["long_pct"]
+
+
+def test_directional_split_confidence_zero_reverts_to_balanced():
+    split = _directional_split(0.25, confidence=0, k=4.0, flat_bias_threshold=5)
+    assert split["long_pct"] == 50
+    assert split["short_pct"] == 50
+
+
+def test_directional_split_negative_score_biases_short():
+    split = _directional_split(-0.5, confidence=100, k=4.0, flat_bias_threshold=5)
+    assert split["short_pct"] > 50
+    assert split["long_pct"] + split["short_pct"] == 100
