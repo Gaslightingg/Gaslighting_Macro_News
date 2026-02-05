@@ -10,7 +10,7 @@ import httpx
 
 from ..models.schemas import PriceHistoryMeta, PriceHistoryPoint, PriceHistoryResponse, PricesResponse
 from ..providers.price_normalizer import normalize_price_ticker
-from ..services.price_catalog import PRICE_TICKERS, resolve_price_config
+from ..services.price_catalog import PRICE_TICKERS, PriceConfig, resolve_price_config
 from ..utils.price_history_db import HistoryPoint, PriceHistoryStore
 from ..utils.settings import get_settings
 
@@ -85,17 +85,43 @@ async def _request_with_retries(
                 return None
 
 
+def _parse_stooq_rows(csv_text: str) -> tuple[list[dict[str, str]], str | None]:
+    text = csv_text.strip()
+    if not text:
+        return [], "empty csv"
+    reader = csv.DictReader(StringIO(text))
+    if not reader.fieldnames:
+        return [], "missing csv header"
+    required = {"Date", "Close"}
+    if not required.issubset(set(reader.fieldnames)):
+        return [], f"missing required columns: {sorted(required)}"
+    rows = [row for row in reader if row.get("Date") and row.get("Close")]
+    if not rows:
+        return [], "no valid rows"
+    return rows, None
+
+
+async def _fetch_stooq_rows(
+    client: httpx.AsyncClient,
+    stooq_symbol: str,
+) -> tuple[list[dict[str, str]], str | None]:
+    url = "https://stooq.com/q/d/l/"
+    response = await _request_with_retries(client, url, {"s": stooq_symbol, "i": "d"})
+    if response is None:
+        logger.warning("Stooq request failed for symbol=%s", stooq_symbol)
+        return [], "request failed"
+    rows, error = _parse_stooq_rows(response.text)
+    if error is not None:
+        logger.warning("Invalid stooq CSV for symbol=%s: %s", stooq_symbol, error)
+    return rows, error
+
+
 async def _fetch_stooq_latest(
     client: httpx.AsyncClient,
     stooq_symbol: str,
 ) -> tuple[float, float, str] | None:
-    url = "https://stooq.com/q/d/l/"
-    response = await _request_with_retries(client, url, {"s": stooq_symbol, "i": "d"})
-    if response is None:
-        return None
-    reader = csv.DictReader(StringIO(response.text))
-    rows = list(reader)
-    if len(rows) < 2:
+    rows, error = await _fetch_stooq_rows(client, stooq_symbol)
+    if error is not None or len(rows) < 2:
         return None
     latest = rows[-1]
     previous = rows[-2]
@@ -103,6 +129,8 @@ async def _fetch_stooq_latest(
         latest_close = float(latest["Close"])
         previous_close = float(previous["Close"])
     except (KeyError, ValueError):
+        return None
+    if previous_close == 0:
         return None
     change_pct = ((latest_close - previous_close) / previous_close) * 100
     return latest_close, round(change_pct, 2), latest["Date"]
@@ -112,13 +140,11 @@ async def _fetch_stooq_history(
     client: httpx.AsyncClient,
     stooq_symbol: str,
 ) -> list[HistoryPoint]:
-    url = "https://stooq.com/q/d/l/"
-    response = await _request_with_retries(client, url, {"s": stooq_symbol, "i": "d"})
-    if response is None:
+    rows, error = await _fetch_stooq_rows(client, stooq_symbol)
+    if error is not None:
         return []
-    reader = csv.DictReader(StringIO(response.text))
     points: list[HistoryPoint] = []
-    for row in reader:
+    for row in rows:
         try:
             value = float(row["Close"])
         except (KeyError, ValueError):
@@ -128,6 +154,62 @@ async def _fetch_stooq_history(
             continue
         points.append(HistoryPoint(date=date, value=value, change_pct=None))
     return points
+
+
+async def _fetch_yfinance_latest(symbol: str) -> tuple[float, float, str] | None:
+    try:
+        import yfinance as yf
+    except ImportError:
+        return None
+
+    def _run() -> tuple[float, float, str] | None:
+        try:
+            history = yf.Ticker(symbol).history(period="5d", interval="1d")
+        except Exception:
+            return None
+        if history.empty or len(history) < 2:
+            return None
+        latest = history.iloc[-1]
+        previous = history.iloc[-2]
+        latest_close = float(latest["Close"])
+        previous_close = float(previous["Close"])
+        if previous_close == 0:
+            return None
+        change_pct = ((latest_close - previous_close) / previous_close) * 100
+        return latest_close, round(change_pct, 2), latest.name.strftime("%Y-%m-%d")
+
+    return await asyncio.to_thread(_run)
+
+
+async def _fetch_yfinance_history(symbol: str) -> list[HistoryPoint]:
+    try:
+        import yfinance as yf
+    except ImportError:
+        return []
+
+    def _run() -> list[HistoryPoint]:
+        try:
+            history = yf.Ticker(symbol).history(period="10y", interval="1d")
+        except Exception:
+            return []
+        if history.empty:
+            return []
+        points: list[HistoryPoint] = []
+        for idx, row in history.iterrows():
+            try:
+                value = float(row["Close"])
+            except (KeyError, ValueError, TypeError):
+                continue
+            date = idx.strftime("%Y-%m-%d")
+            points.append(HistoryPoint(date=date, value=value, change_pct=None))
+        return points
+
+    return await asyncio.to_thread(_run)
+
+
+def _candidate_stooq_symbols(config: PriceConfig) -> list[str]:
+    return [config.stooq_symbol, *config.stooq_fallback_symbols]
+
 
 
 def _is_fresh(timestamp: str | None, ttl: timedelta) -> bool:
@@ -143,18 +225,24 @@ def _is_fresh(timestamp: str | None, ttl: timedelta) -> bool:
 async def _ensure_history(
     store: PriceHistoryStore,
     client: httpx.AsyncClient,
-    symbol_id: str,
-    stooq_symbol: str,
+    config: PriceConfig,
 ) -> list[HistoryPoint]:
-    meta_key = f"history:{symbol_id}:updated_at"
+    meta_key = f"history:{config.id}:updated_at"
     last_update = await store.get_meta(meta_key)
-    points = await store.get_history(symbol_id)
+    points = await store.get_history(config.id)
     if points and _is_fresh(last_update, HISTORY_TTL):
         return points
 
-    fresh_points = await _fetch_stooq_history(client, stooq_symbol)
+    for candidate in _candidate_stooq_symbols(config):
+        fresh_points = await _fetch_stooq_history(client, candidate)
+        if fresh_points:
+            await store.upsert_history(config.id, fresh_points, "stooq")
+            await store.set_meta(meta_key, datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
+            return fresh_points
+
+    fresh_points = await _fetch_yfinance_history(config.yfinance_symbol) if config.yfinance_symbol else []
     if fresh_points:
-        await store.upsert_history(symbol_id, fresh_points, "stooq")
+        await store.upsert_history(config.id, fresh_points, "yfinance")
         await store.set_meta(meta_key, datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
         return fresh_points
     return points
@@ -163,18 +251,34 @@ async def _ensure_history(
 async def _ensure_latest(
     store: PriceHistoryStore,
     client: httpx.AsyncClient,
-    symbol_id: str,
-    stooq_symbol: str,
+    config: PriceConfig,
 ) -> dict[str, object] | None:
-    cached = await store.get_latest(symbol_id)
-    meta_key = f"latest:{symbol_id}:updated_at"
+    cached = await store.get_latest(config.id)
+    meta_key = f"latest:{config.id}:updated_at"
     last_update = await store.get_meta(meta_key)
     if cached and _is_fresh(last_update, LATEST_TTL):
         cached["status"] = cached.get("status") or "cached"
         cached["quality"] = cached.get("quality") or "high"
         return cached
 
-    latest = await _fetch_stooq_latest(client, stooq_symbol)
+    for candidate in _candidate_stooq_symbols(config):
+        latest = await _fetch_stooq_latest(client, candidate)
+        if latest:
+            value, change_pct, date = latest
+            payload = {
+                "value": value,
+                "change": change_pct,
+                "change_pct": change_pct,
+                "last_updated": date,
+                "source": "stooq",
+                "status": "live",
+                "quality": "high",
+            }
+            await store.upsert_latest(config.id, payload)
+            await store.set_meta(meta_key, datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
+            return payload
+
+    latest = await _fetch_yfinance_latest(config.yfinance_symbol) if config.yfinance_symbol else None
     if latest:
         value, change_pct, date = latest
         payload = {
@@ -182,11 +286,11 @@ async def _ensure_latest(
             "change": change_pct,
             "change_pct": change_pct,
             "last_updated": date,
-            "source": "stooq",
+            "source": "yfinance",
             "status": "live",
             "quality": "high",
         }
-        await store.upsert_latest(symbol_id, payload)
+        await store.upsert_latest(config.id, payload)
         await store.set_meta(meta_key, datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
         return payload
 
@@ -213,10 +317,10 @@ async def get_prices_payload() -> PricesResponse:
     )
 
 
-async def _build_ticker_payload(config, store: PriceHistoryStore, client: httpx.AsyncClient) -> dict:
+async def _build_ticker_payload(config: PriceConfig, store: PriceHistoryStore, client: httpx.AsyncClient) -> dict:
     try:
-        latest = await _ensure_latest(store, client, config.id, config.stooq_symbol)
-        history = await _ensure_history(store, client, config.id, config.stooq_symbol)
+        latest = await _ensure_latest(store, client, config)
+        history = await _ensure_history(store, client, config)
         meta = _history_meta(history)
 
         spark_points = history[-SPARKLINE_POINTS:] if history else []
@@ -236,7 +340,7 @@ async def _build_ticker_payload(config, store: PriceHistoryStore, client: httpx.
                 now=datetime.utcnow(),
                 source=None,
                 status="error",
-                error="No price data available",
+                error="No price data available from stooq/yfinance",
             )
 
         # status is required by PriceTicker schema; force a safe non-null default.
@@ -292,7 +396,7 @@ async def get_price_history_payload(symbol: str, range_key: str) -> PriceHistory
 
     store = await _get_store()
     async with httpx.AsyncClient(timeout=20) as client:
-        history = await _ensure_history(store, client, config.id, config.stooq_symbol)
+        history = await _ensure_history(store, client, config)
 
     meta = _history_meta(history)
     points = history
