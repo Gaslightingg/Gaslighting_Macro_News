@@ -22,6 +22,11 @@ const formatValue = (value, unit) => {
   return unit ? `${value.toFixed(2)} ${unit}` : value.toFixed(2);
 };
 
+const formatPointDate = (timestamp) => {
+  if (!Number.isFinite(timestamp)) return "—";
+  return new Date(timestamp).toISOString().slice(0, 10);
+};
+
 const fetchJson = async (url, signal) => {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
@@ -111,33 +116,115 @@ const buildTimeSeriesPath = (points, width, height) => {
     .join(" ");
 };
 
-const Sparkline = ({ values, points, tone, variant = "compact" }) => {
+const Sparkline = ({ values, points, tone, variant = "compact", unit }) => {
   const isLarge = variant === "large";
   const width = isLarge ? 1400 : 120;
   const height = isLarge ? 360 : 34;
+  const plotPoints = useMemo(() => {
+    if (!isLarge || !Array.isArray(points) || points.length < 2) return [];
+    const minT = points[0].t;
+    const maxT = points[points.length - 1].t;
+    const minV = Math.min(...points.map((point) => point.value));
+    const maxV = Math.max(...points.map((point) => point.value));
+    const tRange = maxT - minT || 1;
+    const vRange = maxV - minV || 1;
+    return points.map((point) => ({
+      ...point,
+      x: ((point.t - minT) / tRange) * width,
+      y: height - ((point.value - minV) / vRange) * height,
+    }));
+  }, [height, isLarge, points, width]);
+
   const path = isLarge ? buildTimeSeriesPath(points ?? [], width, height) : buildSparklinePath(values, width, height);
   const areaPath = isLarge ? `${path} L ${width} ${height} L 0 ${height} Z` : "";
+  const [hoverState, setHoverState] = useState(null);
+  const [pinned, setPinned] = useState(false);
+
+  const pickNearestPoint = (clientX, bounds) => {
+    if (!plotPoints.length || !bounds?.width) return null;
+    const relativeX = ((clientX - bounds.left) / bounds.width) * width;
+    let nearest = plotPoints[0];
+    let best = Math.abs(nearest.x - relativeX);
+    for (let i = 1; i < plotPoints.length; i += 1) {
+      const dist = Math.abs(plotPoints[i].x - relativeX);
+      if (dist < best) {
+        best = dist;
+        nearest = plotPoints[i];
+      }
+    }
+    return nearest;
+  };
+
+  const handlePointerMove = (event) => {
+    if (!isLarge || pinned) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    setHoverState(pickNearestPoint(event.clientX, bounds));
+  };
+
+  const handlePointerLeave = () => {
+    if (!pinned) setHoverState(null);
+  };
+
+  const handleTap = (event) => {
+    if (!isLarge) return;
+    const isTouch = window.matchMedia("(pointer: coarse)").matches;
+    if (!isTouch) return;
+    if (pinned) {
+      setPinned(false);
+      setHoverState(null);
+      return;
+    }
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const next = pickNearestPoint(event.clientX, bounds);
+    setHoverState(next);
+    setPinned(true);
+  };
+
+  const tooltipLeftPx = hoverState ? `${Math.min(Math.max((hoverState.x / width) * 100, 10), 90)}%` : "50%";
+
   return (
-    <svg className={`sparkline ${tone ?? "flat"} ${isLarge ? "large" : "compact"}`} width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
-      {isLarge ? (
-        <>
-          <defs>
-            <linearGradient id="sparkArea" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="rgba(213, 165, 75, 0.2)" />
-              <stop offset="100%" stopColor="rgba(213, 165, 75, 0.02)" />
-            </linearGradient>
-          </defs>
-          <g className="spark-grid">
-            <line x1="0" y1={height * 0.2} x2={width} y2={height * 0.2} />
-            <line x1="0" y1={height * 0.4} x2={width} y2={height * 0.4} />
-            <line x1="0" y1={height * 0.6} x2={width} y2={height * 0.6} />
-            <line x1="0" y1={height * 0.8} x2={width} y2={height * 0.8} />
+    <div className={`sparkline-wrap ${isLarge ? "large" : "compact"}`}>
+      <svg
+        className={`sparkline ${tone ?? "flat"} ${isLarge ? "large" : "compact"}`}
+        width={width}
+        height={height}
+        viewBox={`0 0 ${width} ${height}`}
+        onMouseMove={handlePointerMove}
+        onMouseLeave={handlePointerLeave}
+        onClick={handleTap}
+      >
+        {isLarge ? (
+          <>
+            <defs>
+              <linearGradient id="sparkArea" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="rgba(213, 165, 75, 0.2)" />
+                <stop offset="100%" stopColor="rgba(213, 165, 75, 0.02)" />
+              </linearGradient>
+            </defs>
+            <g className="spark-grid">
+              <line x1="0" y1={height * 0.2} x2={width} y2={height * 0.2} />
+              <line x1="0" y1={height * 0.4} x2={width} y2={height * 0.4} />
+              <line x1="0" y1={height * 0.6} x2={width} y2={height * 0.6} />
+              <line x1="0" y1={height * 0.8} x2={width} y2={height * 0.8} />
+            </g>
+          </>
+        ) : null}
+        {areaPath ? <path d={areaPath} className="spark-area" /> : null}
+        {path ? <path d={path} fill="none" /> : <line x1="0" y1="17" x2={width} y2="17" />}
+        {isLarge && hoverState ? (
+          <g className="spark-hover-layer">
+            <line className="spark-crosshair" x1={hoverState.x} y1={0} x2={hoverState.x} y2={height} />
+            <circle className="spark-marker" cx={hoverState.x} cy={hoverState.y} r={6} />
           </g>
-        </>
+        ) : null}
+      </svg>
+      {isLarge && hoverState ? (
+        <div className="chart-tooltip" style={{ left: tooltipLeftPx }}>
+          <span>Date: {formatPointDate(hoverState.t)}</span>
+          <span>Value: {formatValue(hoverState.value, unit)}</span>
+        </div>
       ) : null}
-      {areaPath ? <path d={areaPath} className="spark-area" /> : null}
-      {path ? <path d={path} fill="none" /> : <line x1="0" y1="17" x2={width} y2="17" />}
-    </svg>
+    </div>
   );
 };
 
@@ -367,6 +454,7 @@ const ChartModal = ({ indicator, mode, onClose }) => {
               </button>
             ))}
           </div>
+          <span className="chart-hint">Hover to inspect</span>
           <button className="icon-btn modal-close-fixed" type="button" onClick={onClose}>
             ✕
           </button>
@@ -379,7 +467,7 @@ const ChartModal = ({ indicator, mode, onClose }) => {
             <div className="terminal-state error">{error}</div>
           ) : (
             <div ref={chartCanvasRef} className={`chart-fade-in ${chartReady && canShowChart ? "ready" : "pending"}`} data-render-nonce={chartRenderNonce}>
-              <Sparkline values={values} points={visiblePoints} tone="flat" variant="large" />
+              <Sparkline values={values} points={visiblePoints} tone="flat" variant="large" unit={seriesData?.unit} />
               {loading ? <div className="chart-inline-loading">Updating…</div> : null}
             </div>
           )}
