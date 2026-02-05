@@ -59,7 +59,7 @@ async def macro_latest() -> MacroLatestResponse:
 
 
 @router.get("/macro/series/{indicator_id}", response_model=MacroSeriesResponse)
-async def macro_series(indicator_id: str, range: str = "1y") -> MacroSeriesResponse:
+async def macro_series(indicator_id: str, range: str = "10y") -> MacroSeriesResponse:
     try:
         return await get_series_payload(indicator_id, range)
     except ValueError as exc:
@@ -73,7 +73,7 @@ def macro_refresh() -> dict[str, str]:
 
 
 @router.get("/macro/series", response_model=MacroSeriesResponse)
-async def macro_series_query(indicator: str, range: str = "1y") -> MacroSeriesResponse:
+async def macro_series_query(indicator: str, range: str = "10y") -> MacroSeriesResponse:
     try:
         return await get_series_payload(indicator, range)
     except ValueError as exc:

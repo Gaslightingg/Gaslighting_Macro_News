@@ -24,6 +24,7 @@ class FredClient:
         limit: int = 500,
         sort_order: str = "desc",
         retries: int = 2,
+        observation_start: str | None = None,
     ) -> list[dict[str, Any]]:
         url = "https://api.stlouisfed.org/fred/series/observations"
         params = {
@@ -33,6 +34,8 @@ class FredClient:
             "sort_order": sort_order,
             "limit": limit,
         }
+        if observation_start:
+            params["observation_start"] = observation_start
         attempt = 0
         while True:
             try:
