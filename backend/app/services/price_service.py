@@ -106,7 +106,7 @@ async def _fetch_stooq_history(
         date = row.get("Date")
         if not date:
             continue
-        points.append(HistoryPoint(date=date, value=value))
+        points.append(HistoryPoint(date=date, value=value, change_pct=None))
     return points
 
 

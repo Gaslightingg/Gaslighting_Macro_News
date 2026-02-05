@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 class HistoryPoint:
     date: str
     value: float
+    change_pct: float | None = None
 
 
 class PriceHistoryStore:
@@ -21,47 +23,67 @@ class PriceHistoryStore:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialized = False
+        self._init_lock = asyncio.Lock()
 
     async def _ensure_initialized(self) -> None:
         if self._initialized:
             return
-        async with aiosqlite.connect(self.db_path) as conn:
-            conn.row_factory = aiosqlite.Row
-            await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS price_history (
-                    symbol TEXT NOT NULL,
-                    price REAL NOT NULL,
-                    change_pct REAL,
-                    as_of TEXT NOT NULL,
-                    source TEXT,
-                    PRIMARY KEY (symbol, as_of)
+        async with self._init_lock:
+            if self._initialized:
+                return
+            async with aiosqlite.connect(self.db_path) as conn:
+                conn.row_factory = aiosqlite.Row
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS price_history (
+                        symbol TEXT NOT NULL,
+                        price REAL NOT NULL,
+                        change_pct REAL,
+                        as_of TEXT NOT NULL,
+                        source TEXT,
+                        PRIMARY KEY (symbol, as_of)
+                    )
+                    """
                 )
-                """
-            )
-            await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS price_latest (
-                    symbol TEXT PRIMARY KEY,
-                    price REAL,
-                    change_pct REAL,
-                    as_of TEXT,
-                    source TEXT
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS price_latest (
+                        symbol TEXT PRIMARY KEY,
+                        price REAL,
+                        change_pct REAL,
+                        as_of TEXT,
+                        source TEXT
+                    )
+                    """
                 )
-                """
-            )
-            await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS cache_meta (
-                    key TEXT PRIMARY KEY,
-                    value TEXT
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS cache_meta (
+                        key TEXT PRIMARY KEY,
+                        value TEXT
+                    )
+                    """
                 )
-                """
-            )
-            await self._log_schema(conn, "price_history")
-            await self._log_schema(conn, "price_latest")
-            await conn.commit()
-        self._initialized = True
+                await self._add_column_if_missing(conn, "price_history", "value", "REAL")
+                await self._add_column_if_missing(conn, "price_latest", "value", "REAL")
+                await self._log_schema(conn, "price_history")
+                await self._log_schema(conn, "price_latest")
+                await conn.commit()
+            self._initialized = True
+
+    async def _add_column_if_missing(
+        self,
+        conn: aiosqlite.Connection,
+        table_name: str,
+        column_name: str,
+        column_def: str,
+    ) -> None:
+        async with conn.execute(f"PRAGMA table_info({table_name})") as cur:
+            rows = await cur.fetchall()
+        existing_columns = {row[1] for row in rows}
+        if column_name in existing_columns:
+            return
+        await conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
 
     async def _log_schema(self, conn: aiosqlite.Connection, table_name: str) -> None:
         async with conn.execute(
@@ -87,13 +109,23 @@ class PriceHistoryStore:
         if not points:
             return
         await self._ensure_initialized()
+        rows = [
+            (
+                symbol,
+                point.value,
+                point.change_pct if point.change_pct is not None else 0.0,
+                point.date,
+                source,
+            )
+            for point in points
+        ]
         async with aiosqlite.connect(self.db_path) as conn:
             await conn.executemany(
                 """
                 INSERT OR REPLACE INTO price_history (symbol, price, change_pct, as_of, source)
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                [(symbol, point.value, None, point.date, source) for point in points],
+                rows,
             )
             await conn.commit()
 
