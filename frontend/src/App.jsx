@@ -62,7 +62,7 @@ const buildSparklinePath = (values, width, height) => {
     .map((value, i) => {
       const x = i * step;
       const y = height - ((value - min) / range) * height;
-      return `${i === 0 ? "M" : "L"}${x.toFixed(1)} ${y.toFixed(1)}`;
+      return `${i === 0 ? "M" : "L"}${x} ${y}`;
     })
     .join(" ");
 };
@@ -73,12 +73,49 @@ const buildSparklineAreaPath = (values, width, height) => {
   return `${linePath} L ${width} ${height} L 0 ${height} Z`;
 };
 
-const Sparkline = ({ values, tone, variant = "compact" }) => {
+const parseDateToTimestamp = (value) => {
+  if (value == null) return null;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const normalizeSeriesPoints = (points) => {
+  if (!Array.isArray(points)) return [];
+  return points
+    .map((point, idx) => {
+      const value = Number(point?.value);
+      const t = parseDateToTimestamp(point?.date ?? point?.t ?? point?.timestamp);
+      if (!Number.isFinite(value) || t == null) return null;
+      return { idx, t, value, date: point?.date ?? new Date(t).toISOString().slice(0, 10) };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.t - b.t);
+};
+
+const buildTimeSeriesPath = (points, width, height) => {
+  if (!points || points.length < 2) return "";
+  const minT = points[0].t;
+  const maxT = points[points.length - 1].t;
+  const minV = Math.min(...points.map((point) => point.value));
+  const maxV = Math.max(...points.map((point) => point.value));
+  const tRange = maxT - minT || 1;
+  const vRange = maxV - minV || 1;
+  return points
+    .map((point, idx) => {
+      const x = ((point.t - minT) / tRange) * width;
+      const y = height - ((point.value - minV) / vRange) * height;
+      return `${idx === 0 ? "M" : "L"}${x} ${y}`;
+    })
+    .join(" ");
+};
+
+const Sparkline = ({ values, points, tone, variant = "compact" }) => {
   const isLarge = variant === "large";
-  const width = 120;
+  const width = isLarge ? 1400 : 120;
   const height = isLarge ? 360 : 34;
-  const path = buildSparklinePath(values, width, height);
-  const areaPath = isLarge ? buildSparklineAreaPath(values, width, height) : "";
+  const path = isLarge ? buildTimeSeriesPath(points ?? [], width, height) : buildSparklinePath(values, width, height);
+  const areaPath = isLarge ? `${path} L ${width} ${height} L 0 ${height} Z` : "";
   return (
     <svg className={`sparkline ${tone ?? "flat"} ${isLarge ? "large" : "compact"}`} width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
       {isLarge ? (
@@ -111,7 +148,12 @@ const ChartModal = ({ indicator, mode, onClose }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const modalRef = useRef(null);
+  const chartShellRef = useRef(null);
+  const chartCanvasRef = useRef(null);
   const closeEnabledRef = useRef(false);
+  const [chartReady, setChartReady] = useState(false);
+  const [chartRenderKey, setChartRenderKey] = useState(0);
+  const [chartDims, setChartDims] = useState({ width: 0, height: 0 });
 
   const options = mode === "price" ? PRICE_RANGE_OPTIONS : RANGE_OPTIONS;
 
@@ -121,9 +163,16 @@ const ChartModal = ({ indicator, mode, onClose }) => {
     document.body.style.overflow = "hidden";
     if (modalRef.current) modalRef.current.scrollTop = 0;
     closeEnabledRef.current = false;
+    setChartReady(false);
     const timer = window.setTimeout(() => {
       closeEnabledRef.current = true;
     }, 180);
+    const mountFrame1 = window.requestAnimationFrame(() => {
+      const mountFrame2 = window.requestAnimationFrame(() => {
+        setChartReady(true);
+      });
+      return () => window.cancelAnimationFrame(mountFrame2);
+    });
 
     const onKeyDown = (event) => {
       if (event.key === "Escape") onClose();
@@ -134,14 +183,39 @@ const ChartModal = ({ indicator, mode, onClose }) => {
       window.clearTimeout(timer);
       window.removeEventListener("keydown", onKeyDown);
       document.body.style.overflow = previousOverflow;
+      window.cancelAnimationFrame(mountFrame1);
     };
   }, [indicator, onClose]);
+
+  useEffect(() => {
+    if (!indicator || !chartShellRef.current) return;
+    const node = chartShellRef.current;
+
+    const updateDims = (source) => {
+      const rect = node.getBoundingClientRect();
+      console.debug("[chart-modal] container size", {
+        source,
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      });
+      setChartDims({ width: rect.width, height: rect.height });
+    };
+
+    updateDims("mount");
+    const observer = new ResizeObserver(() => {
+      updateDims("resize");
+    });
+    observer.observe(node);
+
+    return () => observer.disconnect();
+  }, [indicator, range]);
 
   useEffect(() => {
     if (!indicator) return;
     const load = async () => {
       setLoading(true);
       setError(null);
+      setChartReady(false);
       if (modalRef.current) modalRef.current.scrollTop = 0;
       try {
         const endpoint =
@@ -154,6 +228,11 @@ const ChartModal = ({ indicator, mode, onClose }) => {
         setError(err instanceof Error ? err.message : "Failed to load chart.");
       } finally {
         setLoading(false);
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => {
+            setChartReady(true);
+          });
+        });
       }
     };
     load();
@@ -161,8 +240,29 @@ const ChartModal = ({ indicator, mode, onClose }) => {
 
   if (!indicator) return null;
 
-  const values = seriesData?.points?.map((pt) => pt.value) ?? [];
-  const rows = seriesData?.points?.slice(-30).reverse() ?? [];
+  const normalizedPoints = useMemo(() => normalizeSeriesPoints(seriesData?.points), [seriesData]);
+  const values = normalizedPoints.map((pt) => pt.value);
+  const rows = normalizedPoints.slice(-30).reverse();
+  const minChartWidth = window.innerWidth >= 900 ? 400 : 220;
+  const minChartHeight = window.innerWidth >= 900 ? 280 : 220;
+  const canRenderChart = !loading && !error && chartReady && chartDims.width >= minChartWidth && chartDims.height >= minChartHeight;
+
+  useEffect(() => {
+    if (!canRenderChart || !chartCanvasRef.current || !chartShellRef.current) return;
+    const chartRect = chartCanvasRef.current.getBoundingClientRect();
+    const shellRect = chartShellRef.current.getBoundingClientRect();
+    console.debug("[chart-modal] rendered chart width check", {
+      chartWidth: Math.round(chartRect.width),
+      containerWidth: Math.round(shellRect.width),
+    });
+    if (chartRect.width < shellRect.width * 0.6) {
+      console.warn("[chart-modal] detected narrow chart render; forcing rerender", {
+        chartWidth: Math.round(chartRect.width),
+        containerWidth: Math.round(shellRect.width),
+      });
+      window.requestAnimationFrame(() => setChartRenderKey((prev) => prev + 1));
+    }
+  }, [canRenderChart, chartDims.width, chartDims.height, normalizedPoints.length]);
 
   return (
     <div
@@ -196,14 +296,14 @@ const ChartModal = ({ indicator, mode, onClose }) => {
           </button>
         </div>
 
-        <div className="chart-shell panel chart-fixed-height" title="Chart">
-          {loading ? (
+        <div ref={chartShellRef} className="chart-shell panel chart-fixed-height" title="Chart">
+          {loading || !chartReady || chartDims.width < minChartWidth || chartDims.height < minChartHeight ? (
             <div className="chart-skeleton" />
           ) : error ? (
             <div className="terminal-state error">{error}</div>
           ) : (
-            <div className="chart-fade-in">
-              <Sparkline values={values} tone="flat" variant="large" />
+            <div ref={chartCanvasRef} className="chart-fade-in" key={chartRenderKey}>
+              <Sparkline values={values} points={normalizedPoints} tone="flat" variant="large" />
             </div>
           )}
         </div>
@@ -216,7 +316,7 @@ const ChartModal = ({ indicator, mode, onClose }) => {
             <span>Value</span>
           </div>
           {rows.map((row) => (
-            <div key={row.date} className="modal-table-row">
+            <div key={`${row.t}-${row.idx}`} className="modal-table-row">
               <span>{row.date}</span>
               <span>{formatValue(row.value, seriesData?.unit)}</span>
             </div>

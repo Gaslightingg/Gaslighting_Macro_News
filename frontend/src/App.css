@@ -335,6 +335,7 @@ body {
 .sparkline.large {
   width: 100%;
   height: 100%;
+  display: block;
 }
 
 .sparkline.large path {
@@ -455,6 +456,8 @@ body {
 }
 
 .chart-fade-in {
+  display: flex;
+  align-items: stretch;
   animation: chartFade 220ms ease-out both;
 }
 
