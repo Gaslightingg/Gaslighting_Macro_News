@@ -11,6 +11,7 @@ import httpx
 from ..models.schemas import PriceHistoryMeta, PriceHistoryPoint, PriceHistoryResponse, PricesResponse
 from ..providers.price_normalizer import normalize_price_ticker
 from ..services.price_catalog import PRICE_TICKERS, PriceConfig, resolve_price_config
+from ..services.symbols import get_symbol_mapping
 from ..utils.price_history_db import HistoryPoint, PriceHistoryStore
 from ..utils.settings import get_settings
 
@@ -92,14 +93,14 @@ async def _request_with_retries(
 def _parse_stooq_rows(csv_text: str) -> tuple[list[dict[str, str]], str | None]:
     text = (csv_text or "").strip()
     if not text:
-        return [], "no data"
+        return [], "stooq_no_data"
     lowered = text.lower()
-    if lowered.startswith("<html") or lowered.startswith("<!doctype"):
-        return [], "html response"
+    if lowered.startswith("<html") or lowered.startswith("<!doctype") or "<html" in lowered:
+        return [], "stooq_non_csv"
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
-        return [], "no data"
+        return [], "stooq_no_data"
     # Skip leading garbage lines until likely CSV header.
     header_index = 0
     for i, line in enumerate(lines[:5]):
@@ -109,13 +110,19 @@ def _parse_stooq_rows(csv_text: str) -> tuple[list[dict[str, str]], str | None]:
     candidate_csv = "\n".join(lines[header_index:])
     reader = csv.DictReader(StringIO(candidate_csv))
     if not reader.fieldnames:
-        return [], "missing csv header"
+        return [], "stooq_missing_columns"
 
     normalized_fields = {field.strip().lower(): field for field in reader.fieldnames if field}
     date_key = normalized_fields.get("date") or normalized_fields.get("data")
-    close_key = normalized_fields.get("close") or normalized_fields.get("last") or normalized_fields.get("c")
+    close_key = (
+        normalized_fields.get("close")
+        or normalized_fields.get("last")
+        or normalized_fields.get("c")
+        or normalized_fields.get("zamkniecie")
+        or normalized_fields.get("zamknięcie")
+    )
     if not date_key or not close_key:
-        return [], "no date/close columns"
+        return [], "stooq_missing_columns"
 
     rows: list[dict[str, str]] = []
     for row in reader:
@@ -125,7 +132,7 @@ def _parse_stooq_rows(csv_text: str) -> tuple[list[dict[str, str]], str | None]:
             continue
         rows.append({"Date": date, "Close": close})
     if not rows:
-        return [], "no valid rows"
+        return [], "stooq_no_data"
     return rows, None
 
 
@@ -137,11 +144,11 @@ async def _fetch_stooq_rows(
     response = await _request_with_retries(client, url, {"s": stooq_symbol, "i": "d"})
     if response is None:
         logger.warning("Stooq request failed for symbol=%s", stooq_symbol)
-        return [], "request failed"
+        return [], "stooq_request_failed"
     rows, error = _parse_stooq_rows(response.text)
     if error is not None:
         snippet = "\n".join((response.text or "").splitlines()[:3])
-        logger.info("Stooq no data for symbol=%s: %s", stooq_symbol, error)
+        logger.warning("Stooq data issue for symbol=%s: %s", stooq_symbol, error)
         logger.debug("Stooq response snippet for %s:\n%s", stooq_symbol, snippet)
     return rows, error
 
@@ -149,21 +156,21 @@ async def _fetch_stooq_rows(
 async def _fetch_stooq_latest(
     client: httpx.AsyncClient,
     stooq_symbol: str,
-) -> tuple[float, float, str] | None:
+) -> tuple[tuple[float, float, str] | None, str | None]:
     rows, error = await _fetch_stooq_rows(client, stooq_symbol)
     if error is not None or len(rows) < 2:
-        return None
+        return None, error or "stooq_no_data"
     latest = rows[-1]
     previous = rows[-2]
     try:
         latest_close = float(latest["Close"])
         previous_close = float(previous["Close"])
     except (KeyError, ValueError):
-        return None
+        return None, "stooq_missing_columns"
     if previous_close == 0:
-        return None
+        return None, "stooq_no_data"
     change_pct = ((latest_close - previous_close) / previous_close) * 100
-    return latest_close, round(change_pct, 2), latest["Date"]
+    return (latest_close, round(change_pct, 2), latest["Date"]), None
 
 
 async def _fetch_stooq_history(
@@ -186,7 +193,7 @@ async def _fetch_stooq_history(
     return points
 
 
-async def _fetch_yfinance_latest(symbol: str) -> tuple[float, float, str] | None:
+async def _fetch_yfinance_latest(symbol: str, timeout_seconds: float) -> tuple[float, float, str] | None:
     try:
         import yfinance as yf
     except ImportError:
@@ -201,15 +208,21 @@ async def _fetch_yfinance_latest(symbol: str) -> tuple[float, float, str] | None
             return None
         latest = history.iloc[-1]
         previous = history.iloc[-2]
-        latest_close = float(latest["Close"])
-        previous_close = float(previous["Close"])
+        try:
+            latest_close = float(latest["Close"])
+            previous_close = float(previous["Close"])
+        except Exception:
+            return None
         if previous_close == 0:
             return None
         change_pct = ((latest_close - previous_close) / previous_close) * 100
         return latest_close, round(change_pct, 2), latest.name.strftime("%Y-%m-%d")
 
-    for attempt in range(3):
-        result = await asyncio.to_thread(_run)
+    for attempt in range(2):
+        try:
+            result = await asyncio.wait_for(asyncio.to_thread(_run), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            result = None
         if result:
             return result
         await asyncio.sleep(0.4 * (attempt + 1))
@@ -217,7 +230,7 @@ async def _fetch_yfinance_latest(symbol: str) -> tuple[float, float, str] | None
     return None
 
 
-async def _fetch_yfinance_history(symbol: str) -> list[HistoryPoint]:
+async def _fetch_yfinance_history(symbol: str, timeout_seconds: float) -> list[HistoryPoint]:
     try:
         import yfinance as yf
     except ImportError:
@@ -241,7 +254,10 @@ async def _fetch_yfinance_history(symbol: str) -> list[HistoryPoint]:
         return points
 
     for attempt in range(2):
-        points = await asyncio.to_thread(_run)
+        try:
+            points = await asyncio.wait_for(asyncio.to_thread(_run), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            points = []
         if points:
             return points
         await asyncio.sleep(0.5 * (attempt + 1))
@@ -249,8 +265,12 @@ async def _fetch_yfinance_history(symbol: str) -> list[HistoryPoint]:
     return []
 
 
-def _candidate_stooq_symbols(config: PriceConfig) -> list[str]:
-    return [config.stooq_symbol, *config.stooq_fallback_symbols]
+def _resolve_symbols(config: PriceConfig) -> dict[str, str | None]:
+    mapping = get_symbol_mapping(config.id)
+    return {
+        "stooq": mapping.get("stooq") or None,
+        "yfinance": mapping.get("yfinance") or None,
+    }
 
 
 
@@ -275,14 +295,19 @@ async def _ensure_history(
     if points and _is_fresh(last_update, HISTORY_TTL):
         return points
 
-    for candidate in _candidate_stooq_symbols(config):
-        fresh_points = await _fetch_stooq_history(client, candidate)
+    symbols = _resolve_symbols(config)
+    if symbols.get("stooq"):
+        fresh_points = await _fetch_stooq_history(client, symbols["stooq"])
         if fresh_points:
             await store.upsert_history(config.id, fresh_points, "stooq")
             await store.set_meta(meta_key, datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
             return fresh_points
 
-    fresh_points = await _fetch_yfinance_history(config.yfinance_symbol) if config.yfinance_symbol else []
+    fresh_points = (
+        await _fetch_yfinance_history(symbols["yfinance"], timeout_seconds=get_settings().price_fetch_timeout_seconds)
+        if symbols.get("yfinance")
+        else []
+    )
     if fresh_points:
         await store.upsert_history(config.id, fresh_points, "yfinance")
         await store.set_meta(meta_key, datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
@@ -301,10 +326,17 @@ async def _ensure_latest(
     if cached and _is_fresh(last_update, LATEST_TTL):
         cached["status"] = cached.get("status") or "cached"
         cached["quality"] = cached.get("quality") or "high"
+        cached["source"] = "db"
+        cached["tried_sources"] = []
         return cached
 
-    for candidate in _candidate_stooq_symbols(config):
-        latest = await _fetch_stooq_latest(client, candidate)
+    symbols = _resolve_symbols(config)
+    tried_sources: list[str] = []
+    error_reason: str | None = None
+
+    if symbols.get("stooq"):
+        tried_sources.append("stooq")
+        latest, stooq_error = await _fetch_stooq_latest(client, symbols["stooq"])
         if latest:
             value, change_pct, date = latest
             payload = {
@@ -315,32 +347,47 @@ async def _ensure_latest(
                 "source": "stooq",
                 "status": "live",
                 "quality": "high",
+                "tried_sources": tried_sources,
             }
             await store.upsert_latest(config.id, payload)
             await store.set_meta(meta_key, datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
             return payload
+        error_reason = stooq_error or "stooq_failed"
 
-    latest = await _fetch_yfinance_latest(config.yfinance_symbol) if config.yfinance_symbol else None
-    if latest:
-        value, change_pct, date = latest
-        payload = {
-            "value": value,
-            "change": change_pct,
-            "change_pct": change_pct,
-            "last_updated": date,
-            "source": "yfinance",
-            "status": "live",
-            "quality": "high",
-        }
-        await store.upsert_latest(config.id, payload)
-        await store.set_meta(meta_key, datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
-        return payload
+    if symbols.get("yfinance"):
+        tried_sources.append("yfinance")
+        latest = await _fetch_yfinance_latest(
+            symbols["yfinance"],
+            timeout_seconds=get_settings().price_fetch_timeout_seconds,
+        )
+        if latest:
+            value, change_pct, date = latest
+            payload = {
+                "value": value,
+                "change": change_pct,
+                "change_pct": change_pct,
+                "last_updated": date,
+                "source": "yfinance",
+                "status": "live",
+                "quality": "high",
+                "tried_sources": tried_sources,
+            }
+            await store.upsert_latest(config.id, payload)
+            await store.set_meta(meta_key, datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
+            return payload
+        error_reason = "yfinance_failed"
+
+    if not tried_sources and error_reason is None:
+        error_reason = "no_sources_configured"
 
     if cached:
         cached["status"] = "stale"
         cached["quality"] = "low"
+        cached["source"] = cached.get("source") or "db"
+        cached["tried_sources"] = tried_sources
+        cached["error_reason"] = error_reason
         return cached
-    return None
+    return {"status": "error", "error_reason": error_reason, "tried_sources": tried_sources}
 
 
 async def get_prices_payload() -> PricesResponse:
@@ -349,16 +396,19 @@ async def get_prices_payload() -> PricesResponse:
     start_time = datetime.utcnow()
     settings = get_settings()
     cache_ttl = timedelta(seconds=settings.cache_ttl_prices)
+    cache_hit = False
 
     async with _prices_cache_lock:
         cached_payload = _prices_cache.get("payload")
         cached_at = _prices_cache.get("fetched_at")
         if isinstance(cached_at, datetime) and cached_payload and now - cached_at < cache_ttl:
+            cache_hit = True
             logger.info("Prices cache hit (age=%.1fs)", (now - cached_at).total_seconds())
             return cached_payload
     logger.info("Prices cache miss")
 
     errors: dict[str, str] = {}
+    timed_out = False
     async with httpx.AsyncClient(timeout=settings.price_fetch_timeout_seconds) as client:
         semaphore = asyncio.Semaphore(settings.price_fetch_concurrency)
         tasks: dict[asyncio.Task, PriceConfig] = {}
@@ -378,6 +428,7 @@ async def get_prices_payload() -> PricesResponse:
                 errors[config.id] = ticker["error"]
             tickers.append(ticker)
         if pending:
+            timed_out = True
             logger.warning("Price fetch timed out for %s tickers", len(pending))
             for task in pending:
                 task.cancel()
@@ -391,9 +442,19 @@ async def get_prices_payload() -> PricesResponse:
         as_of=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         tickers=tickers,
         errors=errors,
+        timed_out=timed_out,
     )
     duration_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
-    logger.info("Prices fetch completed in %.1fms (tickers=%s, errors=%s)", duration_ms, len(tickers), len(errors))
+    ok_count = sum(1 for ticker in tickers if ticker.get("value") is not None)
+    logger.info(
+        "Prices fetch completed in %.1fms (tickers=%s, ok=%s, errors=%s, timed_out=%s, cache_hit=%s)",
+        duration_ms,
+        len(tickers),
+        ok_count,
+        len(errors),
+        timed_out,
+        cache_hit,
+    )
     async with _prices_cache_lock:
         _prices_cache["payload"] = response
         _prices_cache["fetched_at"] = now
@@ -434,10 +495,15 @@ async def _build_ticker_payload_inner(config: PriceConfig, store: PriceHistorySt
                 source=None,
                 status="error",
                 error="No price data available from stooq/yfinance",
+                error_reason="no_price_data",
             )
 
         # status is required by PriceTicker schema; force a safe non-null default.
         safe_status = (latest or {}).get("status") or "cached"
+        tried_sources = (latest or {}).get("tried_sources") or []
+        error_reason = (latest or {}).get("error_reason")
+        if safe_status == "error" and not error_reason:
+            error_reason = "no_price_data"
 
         return normalize_price_ticker(
             {
@@ -454,9 +520,11 @@ async def _build_ticker_payload_inner(config: PriceConfig, store: PriceHistorySt
                 "history_meta": meta,
             },
             now=datetime.utcnow(),
-            source=latest.get("source") if latest else None,
+            source=latest.get("source") if safe_status == "live" else "db",
             status=safe_status,
-            error=None,
+            error=None if safe_status != "error" else "No price data available",
+            error_reason=error_reason,
+            tried_sources=tried_sources,
         )
     except Exception as exc:
         logger.exception("Failed to build ticker payload for %s", config.id)
@@ -484,9 +552,11 @@ async def _build_cached_payload(config: PriceConfig, store: PriceHistoryStore, e
             "history_meta": meta,
         },
         now=datetime.utcnow(),
-        source=cached.get("source") if cached else None,
+        source="db",
         status="stale" if cached else "error",
         error=error or ("No cached price data" if not cached else None),
+        error_reason="fallback_db" if cached else "no_cached_price",
+        tried_sources=[],
     )
 
 

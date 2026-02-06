@@ -1034,13 +1034,18 @@ function App() {
                   <article key={ticker.id} className="panel card fade-up">
                     <div className="card-row">
                       <span className="symbol">{ticker.symbol ?? ticker.name}</span>
-                      <span className="price">{formatValue(ticker.value, ticker.unit)}</span>
+                      <span className="price">{ticker.value == null ? "Unavailable" : formatValue(ticker.value, ticker.unit)}</span>
                     </div>
                     <p className={`change ${tone}`}>{typeof ticker.change === "number" ? formatChange(ticker.change) : "—"}</p>
                     <Sparkline values={ticker.history_points?.map((p) => p.value) ?? []} tone={tone} />
                     <span className="ticker-meta">
                       {ticker.history_meta?.data_start ? `Data since ${ticker.history_meta.data_start}` : "Data availability pending"}
                     </span>
+                    {ticker.value == null && (ticker.error_reason || ticker.error) ? (
+                      <span className="ticker-meta warning">
+                        {ticker.error_reason || ticker.error}
+                      </span>
+                    ) : null}
                     <div className="card-row">
                       <span className={`status-badge ${ticker.status}`}>{ticker.status}</span>
                       <button type="button" className="chart-btn" onClick={() => setSelectedTicker(ticker)} disabled={ticker.status === "unavailable"}>

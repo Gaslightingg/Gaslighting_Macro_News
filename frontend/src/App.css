@@ -496,6 +496,10 @@ body {
   font-size: 12px;
 }
 
+.ticker-meta.warning {
+  color: var(--short);
+}
+
 .signal-reasons {
   margin: 0;
   padding-left: 18px;

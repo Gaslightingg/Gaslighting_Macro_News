@@ -42,6 +42,8 @@ def normalize_price_ticker(
     source: str | None,
     status: str,
     error: str | None = None,
+    error_reason: str | None = None,
+    tried_sources: list[str] | None = None,
 ) -> dict:
     symbol = raw.get("symbol") or raw.get("name") or raw.get("id") or "Unknown"
     name = raw.get("name") or symbol
@@ -70,10 +72,13 @@ def normalize_price_ticker(
         "change_pct": change_pct,
         "unit": unit,
         "last_updated": raw.get("last_updated") or now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "as_of": raw.get("as_of") or now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "status": status,
         "source": source,
         "quality": "high" if status == "live" else "low",
         "error": error,
+        "error_reason": error_reason,
+        "tried_sources": tried_sources or [],
         "stale": status in {"stale", "cached"},
         "history_points": history_points,
         "history_meta": history_meta,

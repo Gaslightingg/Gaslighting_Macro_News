@@ -27,10 +27,13 @@ class PriceTicker(BaseModel):
     change: float | None
     change_pct: float | None
     last_updated: str | None
+    as_of: str | None = None
     source: str | None
     status: str
     quality: str
     error: str | None = None
+    error_reason: str | None = None
+    tried_sources: List[str] = Field(default_factory=list)
     stale: bool | None = None
     history_points: List[PriceHistoryPoint]
     history_meta: PriceHistoryMeta | None
@@ -40,6 +43,7 @@ class PricesResponse(BaseModel):
     as_of: str
     tickers: List[PriceTicker]
     errors: dict[str, str] = Field(default_factory=dict)
+    timed_out: bool = False
 
 
 class PriceHistoryResponse(BaseModel):
