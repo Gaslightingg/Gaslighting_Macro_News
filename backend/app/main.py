@@ -4,10 +4,12 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from time import perf_counter
+from contextlib import suppress
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from bot.bot_app import start_bot, stop_bot
 from .api.routes import router as api_router
 from .utils.cache_db import CacheStore
 from .utils.logging import configure_logging
@@ -94,3 +96,21 @@ async def _refresh_loop() -> None:
 async def start_scheduler() -> None:
     if not app.state.__dict__.get("refresh_task"):
         app.state.refresh_task = asyncio.create_task(_refresh_loop())
+    if not app.state.__dict__.get("bot_app"):
+        try:
+            app.state.bot_app = await start_bot()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Telegram bot failed to start: %s", exc)
+
+
+@app.on_event("shutdown")
+async def shutdown_services() -> None:
+    refresh_task = app.state.__dict__.get("refresh_task")
+    if refresh_task:
+        refresh_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await refresh_task
+    try:
+        await stop_bot(app.state.__dict__.get("bot_app"))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Telegram bot shutdown failed: %s", exc)
