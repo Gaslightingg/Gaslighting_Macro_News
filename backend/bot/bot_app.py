@@ -8,7 +8,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Mess
 
 from .api_client import ApiClient
 from .config import BotConfig, load_config_optional
-from .handlers import handle_text, menu, on_callback, start
+from .handlers import handle_text, help_command, menu, on_callback, start
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,7 @@ def build_application(config: BotConfig) -> Application:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", menu))
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CallbackQueryHandler(on_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     return application

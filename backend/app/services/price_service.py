@@ -20,6 +20,8 @@ LATEST_TTL = timedelta(minutes=15)
 HISTORY_TTL = timedelta(hours=24)
 SPARKLINE_POINTS = 120
 
+_prices_cache: dict[str, object] = {"payload": None, "fetched_at": None}
+_prices_cache_lock = asyncio.Lock()
 
 
 _store_cache: dict[str, PriceHistoryStore] = {}
@@ -80,9 +82,11 @@ async def _request_with_retries(
             return response
         except httpx.HTTPError as exc:
             attempt += 1
+            backoff = 0.4 * attempt
             if attempt > retries:
-                logger.info("Request failed for %s: %s", url, exc)
+                logger.warning("Request failed for %s after %s attempts: %s", url, attempt, exc)
                 return None
+            await asyncio.sleep(backoff)
 
 
 def _parse_stooq_rows(csv_text: str) -> tuple[list[dict[str, str]], str | None]:
@@ -108,8 +112,8 @@ def _parse_stooq_rows(csv_text: str) -> tuple[list[dict[str, str]], str | None]:
         return [], "missing csv header"
 
     normalized_fields = {field.strip().lower(): field for field in reader.fieldnames if field}
-    date_key = normalized_fields.get("date")
-    close_key = normalized_fields.get("close")
+    date_key = normalized_fields.get("date") or normalized_fields.get("data")
+    close_key = normalized_fields.get("close") or normalized_fields.get("last") or normalized_fields.get("c")
     if not date_key or not close_key:
         return [], "no date/close columns"
 
@@ -136,7 +140,9 @@ async def _fetch_stooq_rows(
         return [], "request failed"
     rows, error = _parse_stooq_rows(response.text)
     if error is not None:
+        snippet = "\n".join((response.text or "").splitlines()[:3])
         logger.info("Stooq no data for symbol=%s: %s", stooq_symbol, error)
+        logger.debug("Stooq response snippet for %s:\n%s", stooq_symbol, snippet)
     return rows, error
 
 
@@ -202,7 +208,13 @@ async def _fetch_yfinance_latest(symbol: str) -> tuple[float, float, str] | None
         change_pct = ((latest_close - previous_close) / previous_close) * 100
         return latest_close, round(change_pct, 2), latest.name.strftime("%Y-%m-%d")
 
-    return await asyncio.to_thread(_run)
+    for attempt in range(3):
+        result = await asyncio.to_thread(_run)
+        if result:
+            return result
+        await asyncio.sleep(0.4 * (attempt + 1))
+    logger.warning("yfinance returned no data for symbol=%s", symbol)
+    return None
 
 
 async def _fetch_yfinance_history(symbol: str) -> list[HistoryPoint]:
@@ -228,7 +240,13 @@ async def _fetch_yfinance_history(symbol: str) -> list[HistoryPoint]:
             points.append(HistoryPoint(date=date, value=value, change_pct=None))
         return points
 
-    return await asyncio.to_thread(_run)
+    for attempt in range(2):
+        points = await asyncio.to_thread(_run)
+        if points:
+            return points
+        await asyncio.sleep(0.5 * (attempt + 1))
+    logger.warning("yfinance returned empty history for symbol=%s", symbol)
+    return []
 
 
 def _candidate_stooq_symbols(config: PriceConfig) -> list[str]:
@@ -328,20 +346,71 @@ async def _ensure_latest(
 async def get_prices_payload() -> PricesResponse:
     store = await _get_store()
     now = datetime.utcnow()
+    start_time = datetime.utcnow()
+    settings = get_settings()
+    cache_ttl = timedelta(seconds=settings.cache_ttl_prices)
 
-    async with httpx.AsyncClient(timeout=20) as client:
-        tasks = []
+    async with _prices_cache_lock:
+        cached_payload = _prices_cache.get("payload")
+        cached_at = _prices_cache.get("fetched_at")
+        if isinstance(cached_at, datetime) and cached_payload and now - cached_at < cache_ttl:
+            logger.info("Prices cache hit (age=%.1fs)", (now - cached_at).total_seconds())
+            return cached_payload
+    logger.info("Prices cache miss")
+
+    errors: dict[str, str] = {}
+    async with httpx.AsyncClient(timeout=settings.price_fetch_timeout_seconds) as client:
+        semaphore = asyncio.Semaphore(settings.price_fetch_concurrency)
+        tasks: dict[asyncio.Task, PriceConfig] = {}
         for config in PRICE_TICKERS:
-            tasks.append(_build_ticker_payload(config, store, client))
-        tickers = await asyncio.gather(*tasks)
+            task = asyncio.create_task(_build_ticker_payload(config, store, client, semaphore))
+            tasks[task] = config
+        done, pending = await asyncio.wait(tasks.keys(), timeout=settings.price_fetch_timeout_seconds)
+        tickers: list[dict] = []
+        for task in done:
+            config = tasks[task]
+            try:
+                ticker = task.result()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Ticker fetch failed for %s: %s", config.id, exc)
+                ticker = await _build_cached_payload(config, store, error=str(exc))
+            if ticker.get("error"):
+                errors[config.id] = ticker["error"]
+            tickers.append(ticker)
+        if pending:
+            logger.warning("Price fetch timed out for %s tickers", len(pending))
+            for task in pending:
+                task.cancel()
+                config = tasks[task]
+                ticker = await _build_cached_payload(config, store, error="timeout")
+                if ticker.get("error"):
+                    errors[config.id] = ticker["error"]
+                tickers.append(ticker)
 
-    return PricesResponse(
+    response = PricesResponse(
         as_of=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         tickers=tickers,
+        errors=errors,
     )
+    duration_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
+    logger.info("Prices fetch completed in %.1fms (tickers=%s, errors=%s)", duration_ms, len(tickers), len(errors))
+    async with _prices_cache_lock:
+        _prices_cache["payload"] = response
+        _prices_cache["fetched_at"] = now
+    return response
 
 
-async def _build_ticker_payload(config: PriceConfig, store: PriceHistoryStore, client: httpx.AsyncClient) -> dict:
+async def _build_ticker_payload(
+    config: PriceConfig,
+    store: PriceHistoryStore,
+    client: httpx.AsyncClient,
+    semaphore: asyncio.Semaphore,
+) -> dict:
+    async with semaphore:
+        return await _build_ticker_payload_inner(config, store, client)
+
+
+async def _build_ticker_payload_inner(config: PriceConfig, store: PriceHistoryStore, client: httpx.AsyncClient) -> dict:
     try:
         latest = await _ensure_latest(store, client, config)
         history = await _ensure_history(store, client, config)
@@ -391,26 +460,34 @@ async def _build_ticker_payload(config: PriceConfig, store: PriceHistoryStore, c
         )
     except Exception as exc:
         logger.exception("Failed to build ticker payload for %s", config.id)
-        return normalize_price_ticker(
-            {
-                "id": config.id,
-                "symbol": config.symbol,
-                "name": config.name,
-                "asset_class": config.asset_class,
-                "unit": config.unit,
-                "history_points": [],
-                "history_meta": PriceHistoryMeta(
-                    data_start=None,
-                    data_end=None,
-                    interval="1d",
-                    points_count=0,
-                ),
-            },
-            now=datetime.utcnow(),
-            source=None,
-            status="error",
-            error=f"Ticker fetch failed: {exc}",
-        )
+        return await _build_cached_payload(config, store, error=f"Ticker fetch failed: {exc}")
+
+
+async def _build_cached_payload(config: PriceConfig, store: PriceHistoryStore, error: str | None = None) -> dict:
+    cached = await store.get_latest(config.id)
+    history = await store.get_history(config.id)
+    meta = _history_meta(history)
+    spark_points = history[-SPARKLINE_POINTS:] if history else []
+    history_points = [PriceHistoryPoint(date=p.date, value=p.value) for p in spark_points]
+    return normalize_price_ticker(
+        {
+            "id": config.id,
+            "symbol": config.symbol,
+            "name": config.name,
+            "asset_class": config.asset_class,
+            "unit": config.unit,
+            "value": cached.get("value") if cached else None,
+            "change": cached.get("change") if cached else None,
+            "change_pct": cached.get("change_pct") if cached else None,
+            "last_updated": cached.get("last_updated") if cached else None,
+            "history_points": history_points,
+            "history_meta": meta,
+        },
+        now=datetime.utcnow(),
+        source=cached.get("source") if cached else None,
+        status="stale" if cached else "error",
+        error=error or ("No cached price data" if not cached else None),
+    )
 
 
 async def get_price_history_payload(symbol: str, range_key: str) -> PriceHistoryResponse:

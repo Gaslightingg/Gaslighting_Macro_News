@@ -15,8 +15,12 @@ logger = logging.getLogger(__name__)
 MENU_MAIN = "menu:main"
 MENU_NEWS = "menu:news"
 MENU_SIGNALS = "menu:signals"
+MENU_PRICES = "menu:prices"
 MENU_STATUS = "menu:status"
+MENU_SETTINGS = "menu:settings"
+MENU_HELP = "menu:help"
 NEWS_PAGE_PREFIX = "news:page:"
+SIGNALS_PAGE_PREFIX = "signals:page:"
 SIGNAL_DETAIL_PREFIX = "signal:"
 
 NEWS_PAGE_SIZE = 5
@@ -27,12 +31,16 @@ def build_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("Main", callback_data=MENU_MAIN),
+                InlineKeyboardButton("Signals", callback_data=MENU_SIGNALS),
                 InlineKeyboardButton("News", callback_data=MENU_NEWS),
             ],
             [
-                InlineKeyboardButton("Signals", callback_data=MENU_SIGNALS),
+                InlineKeyboardButton("Prices", callback_data=MENU_PRICES),
                 InlineKeyboardButton("Status/Refresh", callback_data=MENU_STATUS),
+            ],
+            [
+                InlineKeyboardButton("Settings", callback_data=MENU_SETTINGS),
+                InlineKeyboardButton("Help", callback_data=MENU_HELP),
             ],
         ]
     )
@@ -64,6 +72,22 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Menu:", reply_markup=build_menu())
 
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: BotConfig = context.bot_data["config"]
+    if not _allowed(update, config):
+        await update.message.reply_text("Access denied.")
+        return
+    text = (
+        "ℹ️ *Help*\n"
+        "Use the buttons below or send a ticker (e.g. `sp500`, `xauusd`).\n\n"
+        "Commands:\n"
+        "/start — main menu\n"
+        "/menu — show menu\n"
+        "/help — this help message"
+    )
+    await update.message.reply_text(text, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
+
+
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -76,8 +100,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     api: ApiClient = context.bot_data["api"]
     try:
         if data == MENU_MAIN:
+            await query.edit_message_text("Menu:", reply_markup=build_menu())
+            return
+        if data == MENU_PRICES:
             payload = await api.get_prices()
-            prices = (payload.get("tickers") or [])[:6]
+            prices = (payload.get("tickers") or [])[:10]
             text = format_prices(prices)
             await query.edit_message_text(text, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
             return
@@ -105,28 +132,59 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             ]
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
             return
-        if data == MENU_SIGNALS:
+        if data == MENU_SIGNALS or data.startswith(SIGNALS_PAGE_PREFIX):
             payload = await api.get_signals()
-            signals = (payload.get("signals") or [])[:SIGNALS_PAGE_SIZE]
+            all_signals = payload.get("signals") or []
+            page = 1
+            if data.startswith(SIGNALS_PAGE_PREFIX):
+                page = int(data.replace(SIGNALS_PAGE_PREFIX, "") or "1")
+            start = (page - 1) * SIGNALS_PAGE_SIZE
+            signals = all_signals[start : start + SIGNALS_PAGE_SIZE]
             text = format_signals(signals)
             buttons = [
                 [InlineKeyboardButton(sig["ticker"], callback_data=f"{SIGNAL_DETAIL_PREFIX}{sig['ticker']}")]
                 for sig in signals
             ]
-            buttons.append([InlineKeyboardButton("Menu", callback_data=MENU_MAIN)])
+            nav_buttons = []
+            if start > 0:
+                nav_buttons.append(InlineKeyboardButton("Prev", callback_data=f"{SIGNALS_PAGE_PREFIX}{page - 1}"))
+            if start + SIGNALS_PAGE_SIZE < len(all_signals):
+                nav_buttons.append(InlineKeyboardButton("Next", callback_data=f"{SIGNALS_PAGE_PREFIX}{page + 1}"))
+            if nav_buttons:
+                buttons.append(nav_buttons)
+            buttons.append([InlineKeyboardButton("Back", callback_data=MENU_MAIN)])
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseMode.MARKDOWN)
             return
         if data.startswith(SIGNAL_DETAIL_PREFIX):
             ticker = data.replace(SIGNAL_DETAIL_PREFIX, "")
             payload = await api.get_signal(ticker)
             text = format_signal_detail(payload)
-            await query.edit_message_text(text, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("Back", callback_data=MENU_SIGNALS)],
+                    [InlineKeyboardButton("Menu", callback_data=MENU_MAIN)],
+                ]
+            )
+            await query.edit_message_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
             return
         if data == MENU_STATUS:
             health = await api.get_health()
             refresh = await api.refresh_macro()
             text = format_status(health, refresh)
             await query.edit_message_text(text, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
+            return
+        if data == MENU_SETTINGS:
+            config: BotConfig = context.bot_data["config"]
+            allowed_ids = ", ".join(str(item) for item in sorted(config.allowed_user_ids))
+            text = f"⚙️ *Settings*\nAPI: `{config.api_base_url}`\nAllowed user IDs: `{allowed_ids}`"
+            await query.edit_message_text(text, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
+            return
+        if data == MENU_HELP:
+            await query.edit_message_text(
+                "ℹ️ *Help*\nUse buttons or send a ticker (e.g. `sp500`).",
+                reply_markup=build_menu(),
+                parse_mode=ParseMode.MARKDOWN,
+            )
             return
     except Exception as exc:  # noqa: BLE001
         logger.exception("Bot callback failed: %s", exc)

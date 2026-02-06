@@ -25,20 +25,34 @@ def format_prices(prices: Iterable[dict]) -> str:
 def format_signals(signals: Iterable[dict]) -> str:
     lines = ["🧭 *Signals*"]
     for signal in signals:
-        bias = signal.get("bias") or signal.get("signal")
+        bias = (signal.get("bias") or signal.get("signal") or "FLAT").upper()
         confidence = signal.get("confidence")
         conf_str = f"{confidence}%" if confidence is not None else "—"
+        drivers = signal.get("bullets") or []
+        driver_text = "; ".join(drivers[:3]) if drivers else "No dominant drivers."
         lines.append(f"*{signal.get('ticker')}*: {bias} ({conf_str})")
+        lines.append(f"_{driver_text}_")
     return "\n".join(lines)
 
 
 def format_signal_detail(signal: dict) -> str:
-    bias = signal.get("bias") or signal.get("signal")
+    bias = (signal.get("bias") or signal.get("signal") or "FLAT").upper()
     confidence = signal.get("confidence")
     bullets = signal.get("bullets") or []
+    debug = signal.get("debug") or {}
+    top_pos = debug.get("topPositiveDrivers") or []
+    top_neg = debug.get("topNegativeDrivers") or []
+    missing_inputs = debug.get("missingInputs") or []
     lines = [f"📌 *{signal.get('ticker')}* — {bias} ({confidence}%)"]
-    for bullet in bullets[:5]:
+    if top_pos:
+        lines.append(f"Top +: {', '.join(top_pos)}")
+    if top_neg:
+        lines.append(f"Top -: {', '.join(top_neg)}")
+    for bullet in bullets[:6]:
         lines.append(f"• {bullet}")
+    if missing_inputs:
+        lines.append("")
+        lines.append(f"_Missing inputs: {', '.join(missing_inputs[:6])}_")
     return "\n".join(lines)
 
 

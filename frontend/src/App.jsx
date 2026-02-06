@@ -192,42 +192,23 @@ const fetchJson = async (url, signal) => {
   }
 };
 
-const postJson = async (url, body, signal) => {
-  const controller = new AbortController();
-  if (signal) {
-    if (signal.aborted) controller.abort();
-    else signal.addEventListener("abort", () => controller.abort(), { once: true });
-  }
-  const timeoutId = setTimeout(() => controller.abort("timeout"), REQUEST_TIMEOUT);
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error(`Request failed: ${response.status}`);
-    return await response.json();
-  } finally {
-    clearTimeout(timeoutId);
-  }
-};
-
 const normalizeSignalsPayload = (payload) => {
-  if (!payload) return { updated_at: null, signals: [], errors: ["empty payload"] };
-  if (Array.isArray(payload)) return { updated_at: null, signals: payload, errors: [] };
+  if (!payload) return { updated_at: null, signals: [], errors: ["empty payload"], missing_inputs: [] };
+  if (Array.isArray(payload)) return { updated_at: null, signals: payload, errors: [], missing_inputs: [] };
   if (!Array.isArray(payload.signals)) {
     console.error("[signals] invalid payload", payload);
     return {
       updated_at: payload.updated_at ?? payload.as_of ?? null,
       signals: [],
       errors: ["invalid signals payload shape"],
+      missing_inputs: [],
     };
   }
   return {
     updated_at: payload.updated_at ?? payload.as_of ?? null,
     signals: payload.signals,
     errors: payload.errors ?? [],
+    missing_inputs: payload.missing_inputs ?? [],
   };
 };
 
@@ -723,7 +704,6 @@ function App() {
   const initialView = (() => {
     const q = new URLSearchParams(window.location.search).get("view");
     if (q === "news") return "news";
-    if (q === "tests") return "tests";
     return "main";
   })();
   const initialMainCache = useMemo(
@@ -773,13 +753,6 @@ function App() {
   const [newsRefreshError, setNewsRefreshError] = useState(null);
   const [newsFromCache, setNewsFromCache] = useState(false);
   const [newsCacheInfo, setNewsCacheInfo] = useState(null);
-  const [testsForm, setTestsForm] = useState({
-    ticker: "",
-    intervalDays: 1,
-  });
-  const [testsLoading, setTestsLoading] = useState(false);
-  const [testsError, setTestsError] = useState(null);
-  const [testsResult, setTestsResult] = useState(null);
   const initialRange = (() => {
     const stored = window.localStorage.getItem("news_range");
     const query = new URLSearchParams(window.location.search).get("range");
@@ -952,11 +925,6 @@ function App() {
     window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
   }, [activeView]);
 
-  useEffect(() => {
-    if (testsForm.ticker) return;
-    if (!prices?.tickers?.length) return;
-    setTestsForm((prev) => ({ ...prev, ticker: prices.tickers[0].id }));
-  }, [prices, testsForm.ticker]);
 
   const hasMainData = useMemo(
     () => Boolean(prices || macroCategories.length || signals?.signals?.length || macroLatest.length),
@@ -1001,31 +969,6 @@ function App() {
     touchStartXRef.current = null;
   };
 
-  const handleRunTests = async () => {
-    if (!testsForm.ticker) return;
-    setTestsLoading(true);
-    setTestsError(null);
-    try {
-      const payload = {
-        ticker: testsForm.ticker,
-        interval_days: Number(testsForm.intervalDays) || 1,
-      };
-      const data = await postJson(`${API_BASE}/api/tests/run`, payload);
-      if (!data || data.status !== "success") {
-        setTestsError(data?.error ?? "Test run failed.");
-        setTestsResult(null);
-        return;
-      }
-      setTestsResult(data);
-    } catch (err) {
-      if (isAbortError(err)) return;
-      setTestsError(err instanceof Error ? err.message : "Test run failed.");
-      setTestsResult(null);
-    } finally {
-      setTestsLoading(false);
-    }
-  };
-
   return (
     <div className="app">
       <header className="hero panel fade-up">
@@ -1048,13 +991,6 @@ function App() {
             >
               News
             </button>
-            <button
-              type="button"
-              className={`view-switch-btn ${activeView === "tests" ? "active" : ""}`}
-              onClick={() => setActiveView("tests")}
-            >
-              Tests
-            </button>
           </nav>
         </div>
         <div className="meta-stack">
@@ -1072,7 +1008,7 @@ function App() {
       </header>
 
       <div
-        className={`view-slider-viewport ${activeView === "news" ? "news-active" : activeView === "tests" ? "tests-active" : "main-active"}`}
+        className={`view-slider-viewport ${activeView === "news" ? "news-active" : "main-active"}`}
         onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
       >
@@ -1206,7 +1142,13 @@ function App() {
               })
             : Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} />)}
         </div>
-        <p className="disclaimer">{signals?.errors?.length ? `Signals warnings: ${signals.errors.join("; ")}` : "Not financial advice"}</p>
+        <p className="disclaimer">
+          {signals?.missing_inputs?.length
+            ? `Some macro sources disabled: ${signals.missing_inputs.join("; ")}`
+            : signals?.errors?.length
+            ? `Signals warnings: ${signals.errors.join("; ")}`
+            : "Not financial advice"}
+        </p>
       </section>
 
       
@@ -1307,101 +1249,6 @@ function App() {
         </div>
       </section>
 
-      <section className="view-page page-tests panel fade-up" aria-label="Tests view placeholder">
-        <div className="news-header-row">
-          <h2>Tests</h2>
-          <span className="section-meta">Backtest historical signals</span>
-        </div>
-        <div className="tests-form panel">
-          <label>
-            Ticker
-            <select
-              value={testsForm.ticker}
-              onChange={(e) => setTestsForm((prev) => ({ ...prev, ticker: e.target.value }))}
-              disabled={testsLoading}
-            >
-              <option value="">Select ticker</option>
-              {(prices?.tickers ?? []).map((ticker) => (
-                <option key={ticker.id} value={ticker.id}>
-                  {ticker.symbol ?? ticker.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Interval (days)
-            <input
-              type="number"
-              min="1"
-              value={testsForm.intervalDays}
-              onChange={(e) => setTestsForm((prev) => ({ ...prev, intervalDays: e.target.value }))}
-              disabled={testsLoading}
-            />
-          </label>
-          <button type="button" className="chart-btn" onClick={handleRunTests} disabled={testsLoading || !testsForm.ticker}>
-            {testsLoading ? "Running…" : "Run test"}
-          </button>
-        </div>
-        <p className="muted">
-          Status: {testsLoading ? "Running…" : testsError ? "Error" : testsResult ? "Success" : "Idle"}
-        </p>
-        {testsError ? <div className="terminal-state error">{testsError}</div> : null}
-        {testsResult ? (
-          <div className="tests-results">
-            <div className="news-cache-row">
-              <span className="cache-badge cached">
-                Period {testsResult.period?.start} → {testsResult.period?.end}
-              </span>
-              <span className="muted">{testsResult.cache?.hit ? "Cache hit" : "Cache miss"}</span>
-            </div>
-            <div className="tests-metrics grid">
-              <div className="panel metric-card">
-                <p className="label">Cumulative return</p>
-                <p className="risk-value">{(testsResult.metrics?.cumulative_return ?? 0).toFixed(3)}</p>
-              </div>
-              <div className="panel metric-card">
-                <p className="label">Max drawdown</p>
-                <p className="risk-value">{(testsResult.metrics?.max_drawdown ?? 0).toFixed(3)}</p>
-              </div>
-              <div className="panel metric-card">
-                <p className="label">Trades</p>
-                <p className="risk-value">{testsResult.metrics?.trades_count ?? 0}</p>
-              </div>
-            </div>
-            <div className="panel tests-chart">
-              <div className="section-header">
-                <h3>Equity curve</h3>
-                <span className="section-meta">{testsResult.cache?.hit ? "Cached result" : "Fresh run"}</span>
-              </div>
-              <Sparkline values={(testsResult.equity_curve ?? []).map((point) => point.value)} tone="flat" />
-            </div>
-            <div className="panel tests-trades">
-              <div className="section-header">
-                <h3>Trades</h3>
-                <span className="section-meta">{testsResult.trades?.length ?? 0} total</span>
-              </div>
-              <div className="table">
-                <div className="table-header">
-                  <span>Entry</span><span>Entry Px</span><span>Exit</span><span>Exit Px</span><span>PnL</span><span>Dir</span>
-                </div>
-                {(testsResult.trades ?? []).map((trade) => (
-                  <div key={`${trade.entry_time}-${trade.exit_time}`} className="table-row">
-                    <span>{trade.entry_time}</span>
-                    <span>{trade.entry_price.toFixed(2)}</span>
-                    <span>{trade.exit_time}</span>
-                    <span>{trade.exit_price.toFixed(2)}</span>
-                    <span className={trade.pnl >= 0 ? "positive" : "negative"}>{(trade.pnl * 100).toFixed(2)}%</span>
-                    <span>{trade.direction}</span>
-                  </div>
-                ))}
-                {!testsResult.trades?.length ? <div className="muted">No trades in selected range.</div> : null}
-              </div>
-            </div>
-          </div>
-        ) : (
-          <p className="muted">Configure a ticker and date range to run a historical test.</p>
-        )}
-      </section>
       </div>
       </div>
 

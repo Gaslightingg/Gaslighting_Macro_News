@@ -31,6 +31,7 @@ class PriceTicker(BaseModel):
     status: str
     quality: str
     error: str | None = None
+    stale: bool | None = None
     history_points: List[PriceHistoryPoint]
     history_meta: PriceHistoryMeta | None
 
@@ -38,6 +39,7 @@ class PriceTicker(BaseModel):
 class PricesResponse(BaseModel):
     as_of: str
     tickers: List[PriceTicker]
+    errors: dict[str, str] = Field(default_factory=dict)
 
 
 class PriceHistoryResponse(BaseModel):
@@ -103,11 +105,13 @@ class MacroLatestItem(BaseModel):
     stale_after_seconds: int
     quality: str
     error: str | None = None
+    stale: bool | None = None
 
 
 class MacroLatestResponse(BaseModel):
     as_of: str
     latest: List[MacroLatestItem]
+    stale: bool | None = None
 
 
 class MacroSeriesPoint(BaseModel):
@@ -136,6 +140,8 @@ class FactorContributor(BaseModel):
     contribution: float
     zscore: float
     delta: float
+    weight: float | None = None
+    factor: str | None = None
 
 
 class FactorSnapshot(BaseModel):
@@ -156,6 +162,9 @@ class SignalDebug(BaseModel):
     missingInputs: List[str]
     cacheStatus: str
     migrated: bool | None = None
+    factorContributions: dict[str, List[FactorContributor]] | None = None
+    topPositiveDrivers: List[str] | None = None
+    topNegativeDrivers: List[str] | None = None
 
 
 class SignalCard(BaseModel):
@@ -194,95 +203,7 @@ class SignalsApiResponse(BaseModel):
     updated_at: str
     signals: List[SignalCard]
     errors: List[str]
-
-
-class BacktestRequest(BaseModel):
-    tickers: List[str]
-    start_date: str
-    end_date: str
-    interval_days: int = Field(default=1, ge=1)
-    model: str | None = Field(default="signal_engine")
-
-
-class BacktestMetric(BaseModel):
-    cumulative_return: float
-    max_drawdown: float
-    win_rate: float
-    trades: int
-    avg_trade_return: float
-    sharpe: float | None
-
-
-class BacktestTrade(BaseModel):
-    entry_time: str
-    entry_price: float
-    exit_time: str
-    exit_price: float
-    pnl: float
-    return_pct: float
-    direction: str
-
-
-class BacktestSeriesPoint(BaseModel):
-    date: str
-    value: float
-    signal: str | None = None
-    position: int | None = None
-
-
-class BacktestResult(BaseModel):
-    ticker: str
-    start_date: str
-    end_date: str
-    metrics: BacktestMetric | None
-    trades: List[BacktestTrade]
-    equity_curve: List[BacktestSeriesPoint]
-    status: str
-    error: str | None = None
-    cached: bool = False
-
-
-class BacktestResponse(BaseModel):
-    results: List[BacktestResult]
-
-
-class TestsRunRequest(BaseModel):
-    ticker: str
-    interval_days: int = Field(default=1, ge=1)
-
-
-class TestsRunPeriod(BaseModel):
-    start: str
-    end: str
-
-
-class TestsRunCache(BaseModel):
-    hit: bool
-    key: str
-
-
-class TestsRunMetric(BaseModel):
-    cumulative_return: float
-    max_drawdown: float
-    trades_count: int
-
-
-class TestsRunSignal(BaseModel):
-    date: str
-    signal: str
-    confidence: float | None = None
-    notes: str | None = None
-
-
-class TestsRunResponse(BaseModel):
-    period: TestsRunPeriod
-    cache: TestsRunCache
-    status: str
-    metrics: TestsRunMetric | None
-    signals: List[TestsRunSignal]
-    trades: List[BacktestTrade]
-    equity_curve: List[BacktestSeriesPoint]
-    error: str | None = None
+    missing_inputs: List[str] = Field(default_factory=list)
 
 
 class SignalsDebugTicker(BaseModel):

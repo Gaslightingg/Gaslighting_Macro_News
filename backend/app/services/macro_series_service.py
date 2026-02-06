@@ -189,15 +189,16 @@ async def get_latest_payload() -> MacroLatestResponse:
     cache = CacheStore(settings.cache_db_url)
     cached = cache.get_cache(_latest_cache_key())
     if cached:
-        return MacroLatestResponse(**cached)
+        return MacroLatestResponse(**cached, stale=cached.get("stale", False))
 
     latest_items: list[MacroLatestItem] = []
+    stale_response = False
     as_of = datetime.utcnow().date().isoformat()
     client = FredClient(settings.fred_api_key or "", timeout=settings.request_timeout)
     semaphore = asyncio.Semaphore(6)
 
     async def build_latest(indicator: MacroIndicator) -> None:
-        nonlocal as_of
+        nonlocal as_of, stale_response
         cached_latest = cache.get_latest(indicator.id)
         if cached_latest:
             age_seconds = (datetime.utcnow() - cached_latest.fetched_at).total_seconds()
@@ -213,7 +214,7 @@ async def get_latest_payload() -> MacroLatestResponse:
                         category=indicator.category,
                         status="cached",
                         source=cached_latest.source,
-                        history_points=cache.get_series(indicator.id).__len__(),
+                        history_points=len(cache.get_series(indicator.id) or []),
                         expected_frequency=indicator.frequency,
                         stale_after_seconds=_stale_after_seconds(indicator.frequency),
                         quality=cached_latest.quality or "medium",
@@ -223,10 +224,16 @@ async def get_latest_payload() -> MacroLatestResponse:
                 return
 
         points, error = await _fetch_series(indicator, "1y", client, semaphore)
+        cached_latest = cache.get_latest(indicator.id)
         latest_value = points[-1][1] if points else None
         change = None
         if points and len(points) >= 2:
             change = points[-1][1] - points[-2][1]
+        if not points and cached_latest:
+            latest_value = cached_latest.value
+            change = cached_latest.change
+            error = cached_latest.error or error
+            stale_response = True
         latest_items.append(
             MacroLatestItem(
                 indicator_id=indicator.id,
@@ -234,15 +241,16 @@ async def get_latest_payload() -> MacroLatestResponse:
                 value=latest_value,
                 change=change,
                 unit=indicator.units,
-                last_updated=points[-1][0] if points else None,
+                last_updated=points[-1][0] if points else cached_latest.last_updated if cached_latest else None,
                 category=indicator.category,
-                status="live" if points else "unavailable",
-                source=indicator.source if points else None,
-                history_points=len(points),
+                status="live" if points else "cached" if cached_latest else "unavailable",
+                source=indicator.source if points else cached_latest.source if cached_latest else None,
+                history_points=len(points) if points else len(cache.get_series(indicator.id) or []) if cached_latest else 0,
                 expected_frequency=indicator.frequency,
                 stale_after_seconds=_stale_after_seconds(indicator.frequency),
                 quality="high" if indicator.source == "FRED" else "low",
                 error=error if not points else None,
+                stale=not points and cached_latest is not None,
             )
         )
         if points:
@@ -266,8 +274,9 @@ async def get_latest_payload() -> MacroLatestResponse:
     await asyncio.gather(*[build_latest(ind) for ind in all_indicators()])
     await client.close()
 
-    response = MacroLatestResponse(as_of=as_of, latest=latest_items)
-    cache.set_cache(_latest_cache_key(), response.model_dump(), settings.cache_ttl_latest)
+    response = MacroLatestResponse(as_of=as_of, latest=latest_items, stale=stale_response)
+    cache_ttl = settings.cache_ttl_macro_seconds or settings.cache_ttl_latest
+    cache.set_cache(_latest_cache_key(), response.model_dump(), cache_ttl)
     return response
 
 

@@ -74,6 +74,7 @@ def normalize_price_ticker(
         "source": source,
         "quality": "high" if status == "live" else "low",
         "error": error,
+        "stale": status in {"stale", "cached"},
         "history_points": history_points,
         "history_meta": history_meta,
     }
