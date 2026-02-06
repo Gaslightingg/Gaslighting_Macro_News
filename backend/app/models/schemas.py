@@ -246,6 +246,45 @@ class BacktestResponse(BaseModel):
     results: List[BacktestResult]
 
 
+class TestsRunRequest(BaseModel):
+    ticker: str
+    interval_days: int = Field(default=1, ge=1)
+
+
+class TestsRunPeriod(BaseModel):
+    start: str
+    end: str
+
+
+class TestsRunCache(BaseModel):
+    hit: bool
+    key: str
+
+
+class TestsRunMetric(BaseModel):
+    cumulative_return: float
+    max_drawdown: float
+    trades_count: int
+
+
+class TestsRunSignal(BaseModel):
+    date: str
+    signal: str
+    confidence: float | None = None
+    notes: str | None = None
+
+
+class TestsRunResponse(BaseModel):
+    period: TestsRunPeriod
+    cache: TestsRunCache
+    status: str
+    metrics: TestsRunMetric | None
+    signals: List[TestsRunSignal]
+    trades: List[BacktestTrade]
+    equity_curve: List[BacktestSeriesPoint]
+    error: str | None = None
+
+
 class SignalsDebugTicker(BaseModel):
     ticker: str
     signal: str

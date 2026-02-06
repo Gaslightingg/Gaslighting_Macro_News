@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.services.backtest import _build_trades, _compute_metrics, _parse_date
+from app.services.backtest import _build_trades, _compute_metrics, _parse_date, _resolve_period
 from app.models.schemas import BacktestSeriesPoint
 
 
@@ -36,3 +36,10 @@ def test_compute_metrics_basic() -> None:
     metrics = _compute_metrics([], curve)
     assert metrics.cumulative_return == pytest.approx(0.05, abs=1e-6)
     assert metrics.max_drawdown > 0
+
+
+def test_resolve_period_is_five_years() -> None:
+    start, end = _resolve_period()
+    start_dt = _parse_date(start)
+    end_dt = _parse_date(end)
+    assert (end_dt - start_dt).days >= 365 * 5 - 2

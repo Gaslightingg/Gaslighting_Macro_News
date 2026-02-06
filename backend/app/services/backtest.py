@@ -13,6 +13,12 @@ from ..models.schemas import (
     BacktestResult,
     BacktestSeriesPoint,
     BacktestTrade,
+    TestsRunCache,
+    TestsRunMetric,
+    TestsRunPeriod,
+    TestsRunRequest,
+    TestsRunResponse,
+    TestsRunSignal,
 )
 from ..services.macro_catalog import find_indicator
 from ..services.macro_series_service import get_series_payload
@@ -25,12 +31,15 @@ from ..services.signal_engine import (
     _default_config,
     _directional_split,
 )
-from ..utils.cache_db import CacheStore
+from ..services.ai_openai import OpenAIPredictor
+from ..services.ai_provider import AiPrediction
+from ..services.tests_cache import build_hist_cache_key, get_tests_cache
 from ..utils.settings import get_settings
 
 
 BACKTEST_CACHE_TTL_SECONDS = 5 * 60
 DEFAULT_MODEL = "signal_engine"
+DEFAULT_SIGNAL = "HOLD"
 
 
 @dataclass(frozen=True)
@@ -45,6 +54,13 @@ def _parse_date(value: str) -> date:
         return datetime.strptime(value, "%Y-%m-%d").date()
     except ValueError as exc:
         raise ValueError(f"Invalid date: {value}. Expected YYYY-MM-DD.") from exc
+
+
+def _resolve_period(now: datetime | None = None) -> tuple[str, str]:
+    anchor = now or datetime.utcnow()
+    end = anchor.date()
+    start = (anchor - timedelta(days=365 * 5)).date()
+    return start.isoformat(), end.isoformat()
 
 
 def _date_range_points(points: list[dict], start: date, end: date) -> list[dict]:
@@ -202,6 +218,23 @@ def _build_equity_curve(points: list[dict], positions: list[int]) -> list[Backte
     return curve
 
 
+def _signal_to_position(signal: str) -> int:
+    if signal == "BUY":
+        return 1
+    if signal == "SELL":
+        return -1
+    return 0
+
+
+def _normalize_signal(signal: str) -> str:
+    normalized = signal.upper()
+    if normalized in {"BULLISH", "BUY"}:
+        return "BUY"
+    if normalized in {"BEARISH", "SELL"}:
+        return "SELL"
+    return DEFAULT_SIGNAL
+
+
 def _build_trades(points: list[dict], positions: list[int]) -> list[BacktestTrade]:
     trades: list[BacktestTrade] = []
     entry = None
@@ -287,10 +320,32 @@ def _compute_metrics(trades: list[BacktestTrade], equity_curve: list[BacktestSer
     )
 
 
+def _tests_metrics(trades: list[BacktestTrade], equity_curve: list[BacktestSeriesPoint]) -> TestsRunMetric:
+    if not equity_curve:
+        return TestsRunMetric(cumulative_return=0.0, max_drawdown=0.0, trades_count=len(trades))
+    equity_values = [point.value for point in equity_curve]
+    cumulative_return = equity_values[-1] - equity_values[0]
+    max_dd = _max_drawdown(equity_values)
+    return TestsRunMetric(
+        cumulative_return=round(cumulative_return, 6),
+        max_drawdown=round(max_dd, 6),
+        trades_count=len(trades),
+    )
+
+
+def _ai_provider_from_settings() -> OpenAIPredictor | None:
+    settings = get_settings()
+    if not settings.tests_ai_enabled:
+        return None
+    if settings.tests_ai_provider != "openai":
+        return None
+    if not settings.tests_ai_api_key:
+        return None
+    return OpenAIPredictor(settings.tests_ai_api_key, settings.tests_ai_model)
+
+
 async def run_backtest(request: BacktestRequest) -> BacktestResponse:
     config = _default_config()
-    settings = get_settings()
-    cache = CacheStore(settings.cache_db_url)
     start = _parse_date(request.start_date)
     end = _parse_date(request.end_date)
     if start >= end:
@@ -302,7 +357,8 @@ async def run_backtest(request: BacktestRequest) -> BacktestResponse:
     results: list[BacktestResult] = []
     for ticker in request.tickers:
         cache_key = f"backtest:{ticker}:{request.start_date}:{request.end_date}:{request.interval_days}:{model}"
-        cached = cache.get_cache(cache_key)
+        cache = get_tests_cache()
+        cached = cache.get(cache_key)
         if cached:
             results.append(BacktestResult(**cached, cached=True))
             continue
@@ -364,7 +420,111 @@ async def run_backtest(request: BacktestRequest) -> BacktestResponse:
             error=None,
             cached=False,
         )
-        cache.set_cache(cache_key, result.model_dump(), BACKTEST_CACHE_TTL_SECONDS)
+        cache.set(cache_key, result.model_dump())
         results.append(result)
 
     return BacktestResponse(results=results)
+
+
+async def run_tests(request: TestsRunRequest) -> TestsRunResponse:
+    config = _default_config()
+    ticker = request.ticker
+    start_date, end_date = _resolve_period()
+    cache = get_tests_cache()
+    cache_key = build_hist_cache_key(ticker, request.interval_days, start_date, end_date)
+    hist_cached = cache.get(cache_key)
+    cache_hit = hist_cached is not None
+
+    if hist_cached is None:
+        try:
+            price_payload = await get_price_history_payload(ticker, "max")
+        except ValueError as exc:
+            return TestsRunResponse(
+                period=TestsRunPeriod(start=start_date, end=end_date),
+                cache=TestsRunCache(hit=False, key=cache_key),
+                status="error",
+                metrics=None,
+                signals=[],
+                trades=[],
+                equity_curve=[],
+                error=str(exc),
+            )
+        price_points = [{"t": p.date, "value": p.value} for p in price_payload.points]
+        points = _date_range_points(price_points, _parse_date(start_date), _parse_date(end_date))
+        if len(points) < 2:
+            return TestsRunResponse(
+                period=TestsRunPeriod(start=start_date, end=end_date),
+                cache=TestsRunCache(hit=False, key=cache_key),
+                status="error",
+                metrics=None,
+                signals=[],
+                trades=[],
+                equity_curve=[],
+                error="Not enough price data for selected period.",
+            )
+
+        if request.interval_days > 1:
+            interval_points = []
+            last_date = None
+            for point in points:
+                point_date = datetime.strptime(point["t"], "%Y-%m-%d").date()
+                if last_date is None or (point_date - last_date).days >= request.interval_days:
+                    interval_points.append(point)
+                    last_date = point_date
+            points = interval_points
+
+        indicator_ids = {indicator for defs in (config.factor_definitions or {}).values() for indicator, _ in defs}
+        indicator_series: dict[str, list[dict]] = {}
+        for indicator_id in indicator_ids:
+            payload = await get_series_payload(indicator_id, "10y")
+            indicator_series[indicator_id] = [{"t": p.date, "value": p.value} for p in payload.points]
+
+        hist_cached = {"price_points": points, "indicator_series": indicator_series}
+        cache.set(cache_key, hist_cached)
+
+    points = hist_cached["price_points"]
+    indicator_series = hist_cached["indicator_series"]
+
+    ai_provider = _ai_provider_from_settings()
+    signals: list[TestsRunSignal] = []
+    positions: list[int] = []
+    for point in points:
+        as_of = datetime.strptime(point["t"], "%Y-%m-%d").date()
+        factors = _factors_at_date(as_of, indicator_series, config)
+        base_signal = _signal_at_date(ticker, factors, config)
+        signal_value = _normalize_signal(base_signal.signal)
+        confidence = base_signal.confidence / 100.0
+        notes = None
+        ai_prediction: AiPrediction | None = None
+
+        if ai_provider:
+            context = {
+                "ticker": ticker,
+                "date": point["t"],
+                "signal": base_signal.signal,
+                "score": base_signal.score,
+                "confidence": base_signal.confidence,
+            }
+            ai_prediction = await ai_provider.predict(context)
+        if ai_prediction:
+            signal_value = _normalize_signal(ai_prediction.signal)
+            confidence = ai_prediction.confidence
+            notes = ai_prediction.notes
+
+        signals.append(TestsRunSignal(date=point["t"], signal=signal_value, confidence=confidence, notes=notes))
+        positions.append(_signal_to_position(signal_value))
+
+    equity_curve = _build_equity_curve(points, positions)
+    trades = _build_trades(points, positions)
+    metrics = _tests_metrics(trades, equity_curve)
+
+    return TestsRunResponse(
+        period=TestsRunPeriod(start=start_date, end=end_date),
+        cache=TestsRunCache(hit=cache_hit, key=cache_key),
+        status="success",
+        metrics=metrics,
+        signals=signals,
+        trades=trades,
+        equity_curve=equity_curve,
+        error=None,
+    )

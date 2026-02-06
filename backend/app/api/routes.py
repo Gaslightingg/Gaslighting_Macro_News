@@ -20,6 +20,8 @@ from ..models.schemas import (
     NewsSyncResponse,
     BacktestRequest,
     BacktestResponse,
+    TestsRunRequest,
+    TestsRunResponse,
 )
 from ..services.macro_series_service import (
     clear_cache,
@@ -37,7 +39,7 @@ from ..services.signal_service import (
     recompute_signals_payload,
 )
 from ..services.news_service import get_news_event_payload, get_news_payload, sync_news
-from ..services.backtest import run_backtest
+from ..services.backtest import run_backtest, run_tests
 
 router = APIRouter(prefix="/api")
 
@@ -162,5 +164,13 @@ async def news_sync(months_back: int = 6, months_forward: int = 1) -> NewsSyncRe
 async def tests_backtest(payload: BacktestRequest) -> BacktestResponse:
     try:
         return await run_backtest(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/tests/run", response_model=TestsRunResponse)
+async def tests_run(payload: TestsRunRequest) -> TestsRunResponse:
+    try:
+        return await run_tests(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
