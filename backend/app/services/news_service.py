@@ -10,6 +10,7 @@ from ..utils.price_history_db import PriceHistoryStore
 from ..utils.news_db import NewsStore
 from ..utils.settings import get_settings
 from ..services.news_sync import sync_news_range
+from ..services.news_utils import add_months
 
 _NEWS_CACHE: dict[str, Any] = {"updated_at": None, "payload": None}
 _NEWS_CACHE_TTL = timedelta(minutes=15)
@@ -47,8 +48,8 @@ def _iso(dt: datetime) -> str:
 async def sync_news(months_back: int = 6, months_forward: int = 1) -> dict[str, int | str]:
     store = await _get_store()
     sync_result = await sync_news_range(store, months_back=months_back, months_forward=months_forward)
-    start = _add_months(datetime.now(timezone.utc), -months_back)
-    end = _add_months(datetime.now(timezone.utc), months_forward)
+    start = add_months(datetime.now(timezone.utc), -months_back)
+    end = add_months(datetime.now(timezone.utc), months_forward)
     events = await store.list_events(_iso(start), _iso(end))
     computed = await _compute_impacts_for_events(store, [_row_to_event(e) for e in events])
     return {
@@ -247,20 +248,6 @@ async def get_news_payload(
     }
 
 
-def _add_months(dt: datetime, months: int) -> datetime:
-    month = dt.month - 1 + months
-    year = dt.year + month // 12
-    month = month % 12 + 1
-    day = min(dt.day, _days_in_month(year, month))
-    return dt.replace(year=year, month=month, day=day)
-
-
-def _days_in_month(year: int, month: int) -> int:
-    if month == 12:
-        next_month = datetime(year + 1, 1, 1)
-    else:
-        next_month = datetime(year, month + 1, 1)
-    return (next_month - datetime(year, month, 1)).days
 
 
 async def get_news_event_payload(event_id: str) -> dict | None:

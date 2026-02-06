@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 
 from ..providers.news_provider import NewsProvider, StaticNewsProvider, TradingEconomicsNewsProvider, TradingViewNewsProvider
-from ..services.news_service import _add_months
+from ..services.news_utils import add_months
 from ..utils.settings import get_settings
 from ..utils.news_db import NewsStore
 
@@ -31,8 +31,8 @@ def build_provider_chain() -> list[NewsProvider]:
 
 async def sync_news_range(store: NewsStore, months_back: int = 6, months_forward: int = 1) -> dict[str, int]:
     now = datetime.now(timezone.utc)
-    start = _add_months(now, -months_back)
-    end = _add_months(now, months_forward)
+    start = add_months(now, -months_back)
+    end = add_months(now, months_forward)
 
     provider_chain = build_provider_chain()
     created = 0
