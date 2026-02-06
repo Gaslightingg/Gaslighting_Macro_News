@@ -10,7 +10,7 @@ const resolveApiBase = () => {
 
 const API_BASE = resolveApiBase();
 const IS_DEV = Boolean(import.meta.env.DEV);
-const REQUEST_TIMEOUT = 8000;
+const REQUEST_TIMEOUT = 15000;
 const REFRESH_INTERVAL_MS = 60 * 60 * 1000;
 const DEFAULT_RANGE = "1y";
 const RANGE_OPTIONS = ["1y", "2y", "5y", "max"];
@@ -18,6 +18,8 @@ const PRICE_RANGE_OPTIONS = ["1m", "3m", "6m", "1y", "2y", "5y", "10y", "max"];
 const NEWS_REFRESH_MS = 120 * 1000;
 const DEFAULT_NEWS_RANGE = "6m_before";
 const NEWS_PAGE_SIZE = 120;
+const CACHE_PREFIX = "gm_cache_v1:";
+const CACHE_TTL_MS = 10 * 60 * 1000;
 
 const formatChange = (value) => `${value > 0 ? "+" : ""}${value.toFixed(2)}`;
 const formatValue = (value, unit) => {
@@ -76,14 +78,113 @@ const resolveNewsRange = (rangeKey) => {
   return { start: formatYmd(start), end: formatYmd(now) };
 };
 
-const isAbortError = (err) => err?.name === "AbortError" || String(err?.message ?? "").toLowerCase().includes("aborted");
+const buildNewsUrl = (filters) => {
+  const { start, end } = resolveNewsRange(filters.range);
+  const params = new URLSearchParams({ start, end });
+  if (filters.country !== "ALL") params.set("country", filters.country);
+  if (filters.importance !== "ALL") params.set("importance", filters.importance);
+  if (filters.status !== "ALL") params.set("status", filters.status);
+  if (filters.search.trim()) params.set("search", filters.search.trim());
+  return `${API_BASE}/api/news?${params.toString()}`;
+};
+
+const MAIN_ENDPOINTS = {
+  prices: `${API_BASE}/api/prices`,
+  signals: `${API_BASE}/api/signals`,
+  macroCategories: `${API_BASE}/api/macro/categories`,
+  macroLatest: `${API_BASE}/api/macro/latest`,
+};
+
+const isAbortError = (err) => {
+  const message = String(err?.message ?? "").toLowerCase();
+  return err?.name === "AbortError" || message.includes("aborted") || message.includes("operation was aborted");
+};
+
+const formatCacheTime = (timestamp) => {
+  if (!timestamp) return "—";
+  return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+};
+
+const getCacheKey = (url) => `${CACHE_PREFIX}${url}`;
+
+const readCacheEntry = (url) => {
+  try {
+    const raw = window.localStorage.getItem(getCacheKey(url));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    if (!parsed.fetchedAt) return null;
+    return parsed;
+  } catch (err) {
+    if (IS_DEV) console.debug("[cache] read failed", err);
+    return null;
+  }
+};
+
+const readCachePayload = (url) => {
+  const entry = readCacheEntry(url);
+  if (!entry) return null;
+  return {
+    data: entry.data,
+    fetchedAt: entry.fetchedAt,
+    isStale: Date.now() - entry.fetchedAt > CACHE_TTL_MS,
+  };
+};
+
+const writeCacheEntry = (url, data, fetchedAt = Date.now()) => {
+  try {
+    window.localStorage.setItem(getCacheKey(url), JSON.stringify({ data, fetchedAt }));
+  } catch (err) {
+    if (IS_DEV) console.debug("[cache] write failed", err);
+  }
+};
+
+const inflightRequests = new Map();
+
+const getDedupedRequest = (key, fetcher) => {
+  const existing = inflightRequests.get(key);
+  if (existing) {
+    existing.count += 1;
+    return existing;
+  }
+  const controller = new AbortController();
+  const entry = {
+    controller,
+    count: 1,
+    settled: false,
+    promise: null,
+  };
+  entry.promise = fetcher(controller.signal).finally(() => {
+    entry.settled = true;
+    inflightRequests.delete(key);
+  });
+  inflightRequests.set(key, entry);
+  return entry;
+};
+
+const releaseDedupedRequest = (key) => {
+  const entry = inflightRequests.get(key);
+  if (!entry) return;
+  entry.count = Math.max(0, entry.count - 1);
+  if (entry.count === 0 && !entry.settled) {
+    window.setTimeout(() => {
+      const current = inflightRequests.get(key);
+      if (current && current.count === 0 && !current.settled) {
+        current.controller.abort("cleanup");
+      }
+    }, 0);
+  }
+};
 
 const fetchJson = async (url, signal) => {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
-  const combinedSignal = signal ?? controller.signal;
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener("abort", () => controller.abort(), { once: true });
+  }
+  const timeoutId = setTimeout(() => controller.abort("timeout"), REQUEST_TIMEOUT);
   try {
-    const response = await fetch(url, { signal: combinedSignal });
+    const response = await fetch(url, { signal: controller.signal });
     if (!response.ok) throw new Error(`Request failed: ${response.status}`);
     return await response.json();
   } finally {
@@ -602,12 +703,41 @@ function App() {
     const q = new URLSearchParams(window.location.search).get("view");
     return q === "news" ? "news" : "main";
   })();
-  const [prices, setPrices] = useState(null);
-  const [signals, setSignals] = useState(null);
-  const [macroCategories, setMacroCategories] = useState([]);
-  const [macroLatest, setMacroLatest] = useState([]);
+  const initialMainCache = useMemo(
+    () => ({
+      prices: readCachePayload(MAIN_ENDPOINTS.prices),
+      signals: readCachePayload(MAIN_ENDPOINTS.signals),
+      macroCategories: readCachePayload(MAIN_ENDPOINTS.macroCategories),
+      macroLatest: readCachePayload(MAIN_ENDPOINTS.macroLatest),
+    }),
+    []
+  );
+  const initialMainFetchedAt = useMemo(() => {
+    const times = [
+      initialMainCache.prices?.fetchedAt,
+      initialMainCache.signals?.fetchedAt,
+      initialMainCache.macroCategories?.fetchedAt,
+      initialMainCache.macroLatest?.fetchedAt,
+    ].filter((value) => Number.isFinite(value));
+    if (!times.length) return null;
+    return Math.max(...times);
+  }, [initialMainCache]);
+  const initialMainStale = useMemo(
+    () => [initialMainCache.prices, initialMainCache.signals, initialMainCache.macroCategories, initialMainCache.macroLatest].some((entry) => entry?.isStale),
+    [initialMainCache]
+  );
+  const [prices, setPrices] = useState(() => initialMainCache.prices?.data ?? null);
+  const [signals, setSignals] = useState(() => (initialMainCache.signals?.data ? normalizeSignalsPayload(initialMainCache.signals.data) : null));
+  const [macroCategories, setMacroCategories] = useState(() => initialMainCache.macroCategories?.data?.categories ?? []);
+  const [macroLatest, setMacroLatest] = useState(() => initialMainCache.macroLatest?.data?.latest ?? []);
   const [error, setError] = useState(null);
-  const [lastFetch, setLastFetch] = useState(null);
+  const [lastFetch, setLastFetch] = useState(() => (initialMainFetchedAt ? new Date(initialMainFetchedAt) : null));
+  const [mainRefreshing, setMainRefreshing] = useState(false);
+  const [mainRefreshError, setMainRefreshError] = useState(null);
+  const [mainFromCache, setMainFromCache] = useState(Boolean(initialMainFetchedAt));
+  const [mainCacheInfo, setMainCacheInfo] = useState(() =>
+    initialMainFetchedAt ? { fetchedAt: initialMainFetchedAt, isStale: initialMainStale } : null
+  );
   const [selectedIndicator, setSelectedIndicator] = useState(null);
   const [selectedTicker, setSelectedTicker] = useState(null);
   const [debugMode, setDebugMode] = useState(false);
@@ -617,6 +747,9 @@ function App() {
   const [newsPayload, setNewsPayload] = useState({ updated_at: null, provider_status: "ok", events: [] });
   const [newsLoading, setNewsLoading] = useState(false);
   const [newsError, setNewsError] = useState(null);
+  const [newsRefreshError, setNewsRefreshError] = useState(null);
+  const [newsFromCache, setNewsFromCache] = useState(false);
+  const [newsCacheInfo, setNewsCacheInfo] = useState(null);
   const initialRange = (() => {
     const stored = window.localStorage.getItem("news_range");
     const query = new URLSearchParams(window.location.search).get("range");
@@ -634,25 +767,57 @@ function App() {
   useEffect(() => {
     let timeoutId;
     let intervalId;
-    const controller = new AbortController();
+    let isActive = true;
+    const activeRequests = new Set();
 
     const load = async () => {
       try {
-        const [pricesRes, signalsRes, categoriesRes, latestRes] = await Promise.all([
-          fetchJson(`${API_BASE}/api/prices`, controller.signal),
-          fetchJson(`${API_BASE}/api/signals`, controller.signal),
-          fetchJson(`${API_BASE}/api/macro/categories`, controller.signal),
-          fetchJson(`${API_BASE}/api/macro/latest`, controller.signal),
-        ]);
+        setMainRefreshing(true);
+        setMainRefreshError(null);
+        const requests = [
+          { key: MAIN_ENDPOINTS.prices, fetcher: (signal) => fetchJson(MAIN_ENDPOINTS.prices, signal) },
+          { key: MAIN_ENDPOINTS.signals, fetcher: (signal) => fetchJson(MAIN_ENDPOINTS.signals, signal) },
+          { key: MAIN_ENDPOINTS.macroCategories, fetcher: (signal) => fetchJson(MAIN_ENDPOINTS.macroCategories, signal) },
+          { key: MAIN_ENDPOINTS.macroLatest, fetcher: (signal) => fetchJson(MAIN_ENDPOINTS.macroLatest, signal) },
+        ];
+        const entries = requests.map(({ key, fetcher }) => {
+          activeRequests.add(key);
+          return { key, entry: getDedupedRequest(key, fetcher) };
+        });
+        const [pricesRes, signalsRes, categoriesRes, latestRes] = await Promise.all(entries.map(({ entry }) => entry.promise));
+        if (!isActive) return;
+        const fetchedAt = Date.now();
         setPrices(pricesRes);
         setSignals(normalizeSignalsPayload(signalsRes));
         setMacroCategories(categoriesRes.categories ?? []);
         setMacroLatest(latestRes.latest ?? []);
         setError(null);
-        setLastFetch(new Date());
+        setLastFetch(new Date(fetchedAt));
+        setMainFromCache(false);
+        setMainCacheInfo({ fetchedAt, isStale: false });
+        writeCacheEntry(MAIN_ENDPOINTS.prices, pricesRes, fetchedAt);
+        writeCacheEntry(MAIN_ENDPOINTS.signals, signalsRes, fetchedAt);
+        writeCacheEntry(MAIN_ENDPOINTS.macroCategories, categoriesRes, fetchedAt);
+        writeCacheEntry(MAIN_ENDPOINTS.macroLatest, latestRes, fetchedAt);
       } catch (err) {
+        if (!isActive) return;
+        if (isAbortError(err)) {
+          if (IS_DEV) console.debug("[ui] main fetch aborted", err);
+          return;
+        }
+        const hasCachedMain = Boolean(prices || macroCategories.length || signals?.signals?.length || macroLatest.length);
         console.error("[ui] fetch failed", err);
-        setError(err instanceof Error ? err.message : "Failed to load dashboard.");
+        if (hasCachedMain) {
+          setMainRefreshError("Offline / refresh failed");
+        } else {
+          setError(err instanceof Error ? err.message : "Failed to load dashboard.");
+        }
+      } finally {
+        if (isActive) setMainRefreshing(false);
+        Array.from(activeRequests).forEach((key) => {
+          releaseDedupedRequest(key);
+          activeRequests.delete(key);
+        });
       }
     };
 
@@ -672,7 +837,8 @@ function App() {
     }, nextQuarterDelayMs());
 
     return () => {
-      controller.abort();
+      isActive = false;
+      Array.from(activeRequests).forEach((key) => releaseDedupedRequest(key));
       clearTimeout(timeoutId);
       clearInterval(intervalId);
     };
@@ -685,32 +851,56 @@ function App() {
 
   useEffect(() => {
     if (activeView !== "news") return;
-    const controller = new AbortController();
+    let isActive = true;
+    const activeRequests = new Set();
 
     const loadNews = async () => {
       setNewsLoading(true);
-      const { start, end } = resolveNewsRange(newsFilters.range);
-      const params = new URLSearchParams({ start, end });
-      if (newsFilters.country !== "ALL") params.set("country", newsFilters.country);
-      if (newsFilters.importance !== "ALL") params.set("importance", newsFilters.importance);
-      if (newsFilters.status !== "ALL") params.set("status", newsFilters.status);
-      if (newsFilters.search.trim()) params.set("search", newsFilters.search.trim());
+      setNewsRefreshError(null);
+      const requestUrl = buildNewsUrl(newsFilters);
+      const cachedNews = readCachePayload(requestUrl);
+      if (cachedNews?.data) {
+        setNewsPayload(cachedNews.data ?? { updated_at: null, provider_status: "ok", events: [] });
+        setNewsFromCache(true);
+        setNewsCacheInfo({ fetchedAt: cachedNews.fetchedAt, isStale: cachedNews.isStale });
+        setNewsError(null);
+      }
       try {
-        const data = await fetchJson(`${API_BASE}/api/news?${params.toString()}`, controller.signal);
+        const entry = getDedupedRequest(requestUrl, (signal) => fetchJson(requestUrl, signal));
+        activeRequests.add(requestUrl);
+        const data = await entry.promise;
+        if (!isActive) return;
+        const fetchedAt = Date.now();
         setNewsPayload(data ?? { updated_at: null, provider_status: "ok", events: [] });
         setNewsError(null);
+        setNewsFromCache(false);
+        setNewsCacheInfo({ fetchedAt, isStale: false });
+        writeCacheEntry(requestUrl, data, fetchedAt);
       } catch (err) {
-        if (isAbortError(err)) return;
-        setNewsError(err instanceof Error ? err.message : "Failed to load news");
+        if (!isActive) return;
+        if (isAbortError(err)) {
+          if (IS_DEV) console.debug("[ui] news fetch aborted", err);
+          return;
+        }
+        if (cachedNews?.data) {
+          setNewsRefreshError("Offline / refresh failed");
+        } else {
+          setNewsError(err instanceof Error ? err.message : "Failed to load news");
+        }
       } finally {
-        setNewsLoading(false);
+        if (isActive) setNewsLoading(false);
+        Array.from(activeRequests).forEach((key) => {
+          releaseDedupedRequest(key);
+          activeRequests.delete(key);
+        });
       }
     };
 
     loadNews();
     const id = setInterval(loadNews, NEWS_REFRESH_MS);
     return () => {
-      controller.abort();
+      isActive = false;
+      Array.from(activeRequests).forEach((key) => releaseDedupedRequest(key));
       clearInterval(id);
     };
   }, [activeView, newsFilters]);
@@ -731,6 +921,11 @@ function App() {
     url.searchParams.set("view", activeView);
     window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
   }, [activeView]);
+
+  const hasMainData = useMemo(
+    () => Boolean(prices || macroCategories.length || signals?.signals?.length || macroLatest.length),
+    [macroCategories.length, macroLatest.length, prices, signals]
+  );
 
   const latestById = useMemo(() => {
     const map = new Map();
@@ -798,6 +993,13 @@ function App() {
           <div className="meta-chip">Local {now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
           <div className="meta-chip">Refresh {nextRefresh}</div>
           <div className="meta-chip">As of {prices?.as_of ?? "—"}</div>
+          {mainCacheInfo ? (
+            <div className={`meta-chip cache-chip ${mainCacheInfo.isStale ? "stale" : "cached"}`}>
+              {mainFromCache ? "Cached" : "Updated"} {formatCacheTime(mainCacheInfo.fetchedAt)}
+            </div>
+          ) : null}
+          {mainRefreshing && hasMainData ? <div className="meta-chip refreshing">Refreshing…</div> : null}
+          {mainRefreshError ? <div className="meta-chip warning">{mainRefreshError}</div> : null}
         </div>
       </header>
 
@@ -956,6 +1158,15 @@ function App() {
           <h2>Economic / News Calendar</h2>
           <span className="section-meta">Updated {newsPayload.updated_at ?? "—"}</span>
         </div>
+        {newsCacheInfo ? (
+          <div className="news-cache-row">
+            <span className={`cache-badge ${newsCacheInfo.isStale ? "stale" : "cached"}`}>
+              {newsFromCache ? "Cached" : "Updated"} {formatCacheTime(newsCacheInfo.fetchedAt)}
+            </span>
+            {newsLoading && (newsPayload.events ?? []).length ? <span className="muted">Refreshing…</span> : null}
+            {newsRefreshError ? <span className="muted warning">{newsRefreshError}</span> : null}
+          </div>
+        ) : null}
         <p className="news-range-label">
           {resolveNewsRange(newsFilters.range).start} → {resolveNewsRange(newsFilters.range).end}
         </p>
