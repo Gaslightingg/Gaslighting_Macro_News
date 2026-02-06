@@ -208,16 +208,17 @@ body {
   gap: 12px;
 }
 
-.news-filters {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr)) minmax(0, 1.4fr);
-  gap: 10px;
+.news-range-label {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  letter-spacing: 0.06em;
 }
 
-.news-date-range {
+.news-filters {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
 }
 
 .news-filters select,

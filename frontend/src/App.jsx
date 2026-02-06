@@ -16,7 +16,7 @@ const DEFAULT_RANGE = "1y";
 const RANGE_OPTIONS = ["1y", "2y", "5y", "max"];
 const PRICE_RANGE_OPTIONS = ["1m", "3m", "6m", "1y", "2y", "5y", "10y", "max"];
 const NEWS_REFRESH_MS = 120 * 1000;
-const DEFAULT_NEWS_RANGE = "6m_forward";
+const DEFAULT_NEWS_RANGE = "6m_before";
 const NEWS_PAGE_SIZE = 120;
 
 const formatChange = (value) => `${value > 0 ? "+" : ""}${value.toFixed(2)}`;
@@ -28,6 +28,52 @@ const formatValue = (value, unit) => {
 const formatPointDate = (timestamp) => {
   if (!Number.isFinite(timestamp)) return "—";
   return new Date(timestamp).toISOString().slice(0, 10);
+};
+
+const formatYmd = (date) => date.toISOString().slice(0, 10);
+
+const startOfWeek = (date) => {
+  const d = new Date(date);
+  const day = d.getDay();
+  const diff = (day === 0 ? -6 : 1 - day);
+  d.setDate(d.getDate() + diff);
+  d.setHours(0, 0, 0, 0);
+  return d;
+};
+
+const resolveNewsRange = (rangeKey) => {
+  const now = new Date();
+  const start = new Date(now);
+  const end = new Date(now);
+  start.setHours(0, 0, 0, 0);
+  end.setHours(0, 0, 0, 0);
+
+  switch (rangeKey) {
+    case "6m_before":
+      start.setMonth(start.getMonth() - 6);
+      break;
+    case "3m_before":
+      start.setMonth(start.getMonth() - 3);
+      break;
+    case "1m_before":
+      start.setMonth(start.getMonth() - 1);
+      break;
+    case "2w_before":
+      start.setDate(start.getDate() - 14);
+      break;
+    case "1w_before":
+      start.setDate(start.getDate() - 7);
+      break;
+    case "this_week":
+      return { start: formatYmd(startOfWeek(now)), end: formatYmd(now) };
+    case "this_month":
+      start.setDate(1);
+      return { start: formatYmd(start), end: formatYmd(now) };
+    case "today":
+    default:
+      break;
+  }
+  return { start: formatYmd(start), end: formatYmd(now) };
 };
 
 const isAbortError = (err) => err?.name === "AbortError" || String(err?.message ?? "").toLowerCase().includes("aborted");
@@ -571,8 +617,13 @@ function App() {
   const [newsPayload, setNewsPayload] = useState({ updated_at: null, provider_status: "ok", events: [] });
   const [newsLoading, setNewsLoading] = useState(false);
   const [newsError, setNewsError] = useState(null);
+  const initialRange = (() => {
+    const stored = window.localStorage.getItem("news_range");
+    const query = new URLSearchParams(window.location.search).get("range");
+    return query || stored || DEFAULT_NEWS_RANGE;
+  })();
   const [newsFilters, setNewsFilters] = useState({
-    range: DEFAULT_NEWS_RANGE,
+    range: initialRange,
     country: "ALL",
     importance: "ALL",
     status: "ALL",
@@ -636,38 +687,9 @@ function App() {
     if (activeView !== "news") return;
     const controller = new AbortController();
 
-    const resolveRange = () => {
-      const n = new Date();
-      const start = new Date(n);
-      const end = new Date(n);
-      if (newsFilters.range === "custom" && newsFilters.start && newsFilters.end) {
-        return {
-          start: newsFilters.start,
-          end: newsFilters.end,
-        };
-      }
-      if (newsFilters.range === "today") {
-        // same day
-      } else if (newsFilters.range === "this_week") {
-        end.setDate(end.getDate() + 7);
-      } else if (newsFilters.range === "this_month") {
-        end.setMonth(end.getMonth() + 1);
-      } else if (newsFilters.range === "next_week") {
-        start.setDate(start.getDate() + 7);
-        end.setDate(end.getDate() + 14);
-      } else {
-        start.setMonth(start.getMonth() - 6);
-        end.setMonth(end.getMonth() + 1);
-      }
-      return {
-        start: start.toISOString().slice(0, 10),
-        end: end.toISOString().slice(0, 10),
-      };
-    };
-
     const loadNews = async () => {
       setNewsLoading(true);
-      const { start, end } = resolveRange();
+      const { start, end } = resolveNewsRange(newsFilters.range);
       const params = new URLSearchParams({ start, end });
       if (newsFilters.country !== "ALL") params.set("country", newsFilters.country);
       if (newsFilters.importance !== "ALL") params.set("importance", newsFilters.importance);
@@ -696,6 +718,13 @@ function App() {
   useEffect(() => {
     setNewsPage(1);
   }, [newsFilters]);
+
+  useEffect(() => {
+    window.localStorage.setItem("news_range", newsFilters.range);
+    const url = new URL(window.location.href);
+    url.searchParams.set("range", newsFilters.range);
+    window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  }, [newsFilters.range]);
 
   useEffect(() => {
     const url = new URL(window.location.href);
@@ -927,29 +956,20 @@ function App() {
           <h2>Economic / News Calendar</h2>
           <span className="section-meta">Updated {newsPayload.updated_at ?? "—"}</span>
         </div>
+        <p className="news-range-label">
+          {resolveNewsRange(newsFilters.range).start} → {resolveNewsRange(newsFilters.range).end}
+        </p>
         <div className="news-filters">
           <select value={newsFilters.range} onChange={(e) => setNewsFilters((p) => ({ ...p, range: e.target.value }))}>
+            <option value="6m_before">6M before</option>
+            <option value="3m_before">3M before</option>
+            <option value="1m_before">1M before</option>
+            <option value="2w_before">2W before</option>
+            <option value="1w_before">1W before</option>
             <option value="today">Today</option>
             <option value="this_week">This week</option>
             <option value="this_month">This month</option>
-            <option value="next_week">Next week</option>
-            <option value="6m_forward">6M back + 1M forward</option>
-            <option value="custom">Custom</option>
           </select>
-          {newsFilters.range === "custom" ? (
-            <div className="news-date-range">
-              <input
-                type="date"
-                value={newsFilters.start ?? ""}
-                onChange={(e) => setNewsFilters((p) => ({ ...p, start: e.target.value }))}
-              />
-              <input
-                type="date"
-                value={newsFilters.end ?? ""}
-                onChange={(e) => setNewsFilters((p) => ({ ...p, end: e.target.value }))}
-              />
-            </div>
-          ) : null}
           <select value={newsFilters.country} onChange={(e) => setNewsFilters((p) => ({ ...p, country: e.target.value }))}>
             <option value="ALL">All countries</option>
             <option value="US">US</option>
