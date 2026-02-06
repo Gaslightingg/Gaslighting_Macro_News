@@ -50,3 +50,6 @@ class ApiClient:
 
     async def refresh_macro(self) -> dict:
         return await self._post("/api/macro/refresh", payload={})
+
+    async def get_macro_latest(self) -> dict:
+        return await self._get("/api/macro/latest")

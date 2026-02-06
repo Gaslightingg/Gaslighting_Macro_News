@@ -112,6 +112,8 @@ class MacroLatestResponse(BaseModel):
     as_of: str
     latest: List[MacroLatestItem]
     stale: bool | None = None
+    missing_inputs: List[str] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
 
 
 class MacroSeriesPoint(BaseModel):

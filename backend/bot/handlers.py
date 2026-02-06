@@ -8,7 +8,15 @@ from telegram.ext import ContextTypes
 
 from .api_client import ApiClient
 from .config import BotConfig
-from .utils.formatting import format_news, format_prices, format_signal_detail, format_signals, format_status
+from .utils.formatting import (
+    format_macro_summary,
+    format_news,
+    format_prices,
+    format_signal_detail,
+    format_signal_summary,
+    format_signals,
+    format_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -17,11 +25,12 @@ MENU_NEWS = "menu:news"
 MENU_SIGNALS = "menu:signals"
 MENU_PRICES = "menu:prices"
 MENU_STATUS = "menu:status"
-MENU_SETTINGS = "menu:settings"
+MENU_MACRO = "menu:macro"
 MENU_HELP = "menu:help"
 NEWS_PAGE_PREFIX = "news:page:"
 SIGNALS_PAGE_PREFIX = "signals:page:"
-SIGNAL_DETAIL_PREFIX = "signal:"
+SIGNAL_PICK_PREFIX = "signal:pick:"
+SIGNAL_DETAIL_PREFIX = "signal:detail:"
 
 NEWS_PAGE_SIZE = 5
 SIGNALS_PAGE_SIZE = 5
@@ -32,14 +41,14 @@ def build_menu() -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton("Signals", callback_data=MENU_SIGNALS),
-                InlineKeyboardButton("News", callback_data=MENU_NEWS),
+                InlineKeyboardButton("Macro", callback_data=MENU_MACRO),
             ],
             [
                 InlineKeyboardButton("Prices", callback_data=MENU_PRICES),
-                InlineKeyboardButton("Status/Refresh", callback_data=MENU_STATUS),
+                InlineKeyboardButton("News", callback_data=MENU_NEWS),
             ],
             [
-                InlineKeyboardButton("Settings", callback_data=MENU_SETTINGS),
+                InlineKeyboardButton("Status", callback_data=MENU_STATUS),
                 InlineKeyboardButton("Help", callback_data=MENU_HELP),
             ],
         ]
@@ -58,34 +67,54 @@ def _allowed(update: Update, config: BotConfig) -> bool:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config: BotConfig = context.bot_data["config"]
     if not _allowed(update, config):
-        await update.message.reply_text("Access denied.")
+        await update.effective_message.reply_text("Access denied.")
         return
-    text = "Welcome! Choose a section:"
-    await update.message.reply_text(text, reply_markup=build_menu())
+    text = "Welcome! Use the buttons below to navigate."
+    await update.effective_message.reply_text(text, reply_markup=build_menu())
 
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config: BotConfig = context.bot_data["config"]
     if not _allowed(update, config):
-        await update.message.reply_text("Access denied.")
+        await update.effective_message.reply_text("Access denied.")
         return
-    await update.message.reply_text("Menu:", reply_markup=build_menu())
+    await update.effective_message.reply_text("Menu:", reply_markup=build_menu())
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config: BotConfig = context.bot_data["config"]
     if not _allowed(update, config):
-        await update.message.reply_text("Access denied.")
+        await update.effective_message.reply_text("Access denied.")
         return
     text = (
         "ℹ️ *Help*\n"
-        "Use the buttons below or send a ticker (e.g. `sp500`, `xauusd`).\n\n"
+        "Just tap the buttons below — commands are optional.\n\n"
         "Commands:\n"
         "/start — main menu\n"
-        "/menu — show menu\n"
-        "/help — this help message"
+        "/help — this help message\n"
+        "/status — system status"
     )
-    await update.message.reply_text(text, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text(text, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
+
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: BotConfig = context.bot_data["config"]
+    if not _allowed(update, config):
+        await update.effective_message.reply_text("Access denied.")
+        return
+    api: ApiClient = context.bot_data["api"]
+    try:
+        health = await api.get_health()
+        signals = await api.get_signals()
+        macro_latest = await api.get_macro_latest()
+        await update.effective_message.reply_text(
+            format_status(health, signals=signals, macro_latest=macro_latest),
+            reply_markup=build_menu(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Bot status failed: %s", exc)
+        await update.effective_message.reply_text("API unavailable. Please try again later.", reply_markup=build_menu())
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -105,7 +134,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if data == MENU_PRICES:
             payload = await api.get_prices()
             prices = (payload.get("tickers") or [])[:10]
-            text = format_prices(prices)
+            text = format_prices(prices, errors=payload.get("errors"))
+            await query.edit_message_text(text, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
+            return
+        if data == MENU_MACRO:
+            payload = await api.get_macro_latest()
+            text = format_macro_summary(payload)
             await query.edit_message_text(text, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
             return
         if data == MENU_NEWS:
@@ -142,7 +176,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             signals = all_signals[start : start + SIGNALS_PAGE_SIZE]
             text = format_signals(signals)
             buttons = [
-                [InlineKeyboardButton(sig["ticker"], callback_data=f"{SIGNAL_DETAIL_PREFIX}{sig['ticker']}")]
+                [InlineKeyboardButton(sig["ticker"], callback_data=f"{SIGNAL_PICK_PREFIX}{sig['ticker']}")]
                 for sig in signals
             ]
             nav_buttons = []
@@ -155,53 +189,57 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             buttons.append([InlineKeyboardButton("Back", callback_data=MENU_MAIN)])
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseMode.MARKDOWN)
             return
-        if data.startswith(SIGNAL_DETAIL_PREFIX):
-            ticker = data.replace(SIGNAL_DETAIL_PREFIX, "")
+        if data.startswith(SIGNAL_PICK_PREFIX):
+            ticker = data.replace(SIGNAL_PICK_PREFIX, "")
             payload = await api.get_signal(ticker)
-            text = format_signal_detail(payload)
+            text = format_signal_summary(payload)
             keyboard = InlineKeyboardMarkup(
                 [
-                    [InlineKeyboardButton("Back", callback_data=MENU_SIGNALS)],
+                    [
+                        InlineKeyboardButton("Details", callback_data=f"{SIGNAL_DETAIL_PREFIX}{ticker}"),
+                        InlineKeyboardButton("Back", callback_data=MENU_SIGNALS),
+                    ],
                     [InlineKeyboardButton("Menu", callback_data=MENU_MAIN)],
                 ]
             )
             await query.edit_message_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
             return
+        if data.startswith(SIGNAL_DETAIL_PREFIX):
+            ticker = data.replace(SIGNAL_DETAIL_PREFIX, "")
+            payload = await api.get_signal(ticker)
+            await query.message.reply_text(format_signal_detail(payload), parse_mode=ParseMode.MARKDOWN)
+            return
         if data == MENU_STATUS:
             health = await api.get_health()
-            refresh = await api.refresh_macro()
-            text = format_status(health, refresh)
-            await query.edit_message_text(text, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
-            return
-        if data == MENU_SETTINGS:
-            config: BotConfig = context.bot_data["config"]
-            allowed_ids = ", ".join(str(item) for item in sorted(config.allowed_user_ids))
-            text = f"⚙️ *Settings*\nAPI: `{config.api_base_url}`\nAllowed user IDs: `{allowed_ids}`"
+            signals = await api.get_signals()
+            macro_latest = await api.get_macro_latest()
+            text = format_status(health, signals=signals, macro_latest=macro_latest)
             await query.edit_message_text(text, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
             return
         if data == MENU_HELP:
             await query.edit_message_text(
-                "ℹ️ *Help*\nUse buttons or send a ticker (e.g. `sp500`).",
+                "ℹ️ *Help*\nJust tap the buttons below — commands are optional.",
                 reply_markup=build_menu(),
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Bot callback failed: %s", exc)
+        logger.warning("Bot callback failed: %s", exc)
         await query.edit_message_text("API unavailable. Please try again later.", reply_markup=build_menu())
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config: BotConfig = context.bot_data["config"]
     if not _allowed(update, config):
-        await update.message.reply_text("Access denied.")
+        await update.effective_message.reply_text("Access denied.")
         return
-    text = update.message.text.strip()
+    text = update.effective_message.text.strip()
     if not text:
         return
     api: ApiClient = context.bot_data["api"]
     try:
         payload = await api.get_signal(text.lower())
-        await update.message.reply_text(format_signal_detail(payload), parse_mode=ParseMode.MARKDOWN)
-    except Exception:
-        await update.message.reply_text("Ticker not found or API unavailable. Try again.")
+        await update.effective_message.reply_text(format_signal_detail(payload), parse_mode=ParseMode.MARKDOWN)
+    except Exception as exc:
+        logger.warning("Bot text lookup failed: %s", exc)
+        await update.effective_message.reply_text("Ticker not found or API unavailable. Try again.")

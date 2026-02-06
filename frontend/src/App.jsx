@@ -733,6 +733,10 @@ function App() {
   const [signals, setSignals] = useState(() => (initialMainCache.signals?.data ? normalizeSignalsPayload(initialMainCache.signals.data) : null));
   const [macroCategories, setMacroCategories] = useState(() => initialMainCache.macroCategories?.data?.categories ?? []);
   const [macroLatest, setMacroLatest] = useState(() => initialMainCache.macroLatest?.data?.latest ?? []);
+  const [macroLatestMeta, setMacroLatestMeta] = useState(() => ({
+    missing_inputs: initialMainCache.macroLatest?.data?.missing_inputs ?? [],
+    errors: initialMainCache.macroLatest?.data?.errors ?? [],
+  }));
   const [error, setError] = useState(null);
   const [lastFetch, setLastFetch] = useState(() => (initialMainFetchedAt ? new Date(initialMainFetchedAt) : null));
   const [mainRefreshing, setMainRefreshing] = useState(false);
@@ -794,6 +798,10 @@ function App() {
         setSignals(normalizeSignalsPayload(signalsRes));
         setMacroCategories(categoriesRes.categories ?? []);
         setMacroLatest(latestRes.latest ?? []);
+        setMacroLatestMeta({
+          missing_inputs: latestRes.missing_inputs ?? [],
+          errors: latestRes.errors ?? [],
+        });
         setError(null);
         setLastFetch(new Date(fetchedAt));
         setMainFromCache(false);
@@ -1052,6 +1060,11 @@ function App() {
           <h2>Macro</h2>
           <span className="section-meta">Updated {macroLatest[0]?.last_updated ?? "Loading..."}</span>
         </div>
+        {macroLatestMeta.missing_inputs?.length ? (
+          <div className="macro-warning">
+            Macro sources disabled: {macroLatestMeta.missing_inputs.join("; ")}
+          </div>
+        ) : null}
 
         {!macroCategories.length ? (
           <div className="grid macro-grid">{Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} />)}</div>
@@ -1066,19 +1079,23 @@ function App() {
                 {category.indicators.map((indicator) => {
                   const latest = latestById.get(indicator.id);
                   const tone = typeof latest?.change === "number" && latest.change < 0 ? "negative" : "positive";
+                  const status = latest?.status ?? "unknown";
+                  const reason = latest?.error;
+                  const isUnavailable = ["unavailable", "disabled", "no_data", "error"].includes(status);
+                  const updatedLabel = latest?.last_updated ?? (reason && isUnavailable ? reason : "—");
                   return (
                     <div key={indicator.id} className="table-row">
                       <span className="table-title">{indicator.name}</span>
                       <span>{formatValue(latest?.value, latest?.unit)}</span>
                       <span className={`table-change ${tone}`}>{typeof latest?.change === "number" ? formatChange(latest.change) : "—"}</span>
-                      <span className="table-date">{latest?.last_updated ?? "—"}</span>
-                      <span className={`status-badge ${latest?.status ?? "unknown"}`}>{latest?.status ?? "unknown"}</span>
+                      <span className={`table-date ${reason && isUnavailable ? "table-reason" : ""}`}>{updatedLabel}</span>
+                      <span className={`status-badge ${status}`}>{status}</span>
                       <span className={`quality-badge ${latest?.quality ?? "low"}`}>{latest?.quality ?? "low"}</span>
                       <button
                         type="button"
                         className="chart-btn"
                         onClick={() => setSelectedIndicator(indicator)}
-                        disabled={!latest || latest.status === "unavailable"}
+                        disabled={!latest || isUnavailable}
                       >
                         Chart
                       </button>
