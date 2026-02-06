@@ -34,6 +34,12 @@ def _key_present(value: str | None) -> str:
 
 logger.info("FRED_API_KEY present: %s", _key_present(settings.fred_api_key))
 logger.info("BEA_API_KEY present: %s", _key_present(settings.bea_api_key))
+logger.info(
+    "Telegram config: enabled=%s, token_present=%s, allowed_user_id=%s",
+    settings.telegram_enabled,
+    _key_present(settings.telegram_bot_token),
+    settings.telegram_allowed_user_id,
+)
 
 app.add_middleware(
     CORSMiddleware,

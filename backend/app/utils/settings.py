@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     news_provider: str = Field(default="auto", validation_alias="NEWS_PROVIDER")
     tradingeconomics_api_key: Optional[str] = Field(default=None, validation_alias="TRADINGECONOMICS_API_KEY")
     news_timezone: str = Field(default="Europe/Moscow", validation_alias="NEWS_TIMEZONE")
+    telegram_enabled: bool = Field(default=False, validation_alias="TELEGRAM_ENABLED")
+    telegram_bot_token: Optional[str] = Field(default=None, validation_alias="TELEGRAM_BOT_TOKEN")
+    telegram_allowed_user_id: Optional[int] = Field(default=None, validation_alias="TELEGRAM_ALLOWED_USER_ID")
+    telegram_allowed_chat_id: Optional[int] = Field(default=None, validation_alias="TELEGRAM_ALLOWED_CHAT_ID")
+    api_base_url: str = Field(default="http://127.0.0.1:8000", validation_alias="API_BASE_URL")
 
     def resolved_database_path(self) -> Path:
         path = Path(self.database_path)

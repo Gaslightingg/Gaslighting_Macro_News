@@ -30,6 +30,7 @@ Key variables for real data mode:
 - `CACHE_DB_URL` for the persistent cache database (default `sqlite:///./cache.db`).
 - `CACHE_TTL_LATEST`, `CACHE_TTL_SERIES_1Y`, `CACHE_TTL_SERIES_5Y`, `CACHE_TTL_PRICES`, `CACHE_TTL_SIGNALS` to tune caching.
 - `FRED_PMI_SERIES_ID` to override the PMI/ISM series id if `NAPM` is unavailable.
+- `TELEGRAM_ENABLED`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_ID`, and `API_BASE_URL` to enable the Telegram bot in the backend lifecycle.
 
 ### Data sources
 
