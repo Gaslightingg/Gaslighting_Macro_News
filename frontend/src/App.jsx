@@ -701,7 +701,9 @@ const ChartModal = ({ indicator, mode, onClose }) => {
 function App() {
   const initialView = (() => {
     const q = new URLSearchParams(window.location.search).get("view");
-    return q === "news" ? "news" : "main";
+    if (q === "news") return "news";
+    if (q === "tests") return "tests";
+    return "main";
   })();
   const initialMainCache = useMemo(
     () => ({
@@ -987,6 +989,13 @@ function App() {
             >
               News
             </button>
+            <button
+              type="button"
+              className={`view-switch-btn ${activeView === "tests" ? "active" : ""}`}
+              onClick={() => setActiveView("tests")}
+            >
+              Tests
+            </button>
           </nav>
         </div>
         <div className="meta-stack">
@@ -1004,7 +1013,7 @@ function App() {
       </header>
 
       <div
-        className={`view-slider-viewport ${activeView === "news" ? "news-active" : "main-active"}`}
+        className={`view-slider-viewport ${activeView === "news" ? "news-active" : activeView === "tests" ? "tests-active" : "main-active"}`}
         onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
       >
@@ -1237,6 +1246,14 @@ function App() {
           {newsLoading ? <div className="muted">Refreshing news…</div> : null}
           {!newsLoading && !(newsPayload.events ?? []).length ? <div className="muted">No events in selected range.</div> : null}
         </div>
+      </section>
+
+      <section className="view-page page-tests panel fade-up" aria-label="Tests view placeholder">
+        <div className="news-header-row">
+          <h2>Tests</h2>
+          <span className="section-meta">Placeholder</span>
+        </div>
+        <p className="muted">Historical test harness will land here.</p>
       </section>
       </div>
       </div>
