@@ -1085,9 +1085,10 @@ function App() {
                   const latest = latestById.get(indicator.id);
                   const tone = typeof latest?.change === "number" && latest.change < 0 ? "negative" : "positive";
                   const status = latest?.status ?? "unknown";
-                  const reason = latest?.error;
+                  const reason = latest?.reason ?? latest?.error;
                   const isUnavailable = ["unavailable", "disabled", "no_data", "error"].includes(status);
                   const updatedLabel = latest?.last_updated ?? (reason && isUnavailable ? reason : "—");
+                  const qualityLabel = isUnavailable ? (latest?.quality ?? "disabled") : (latest?.quality ?? "low");
                   return (
                     <div key={indicator.id} className="table-row">
                       <span className="table-title">{indicator.name}</span>
@@ -1095,7 +1096,7 @@ function App() {
                       <span className={`table-change ${tone}`}>{typeof latest?.change === "number" ? formatChange(latest.change) : "—"}</span>
                       <span className={`table-date ${reason && isUnavailable ? "table-reason" : ""}`}>{updatedLabel}</span>
                       <span className={`status-badge ${status}`}>{status}</span>
-                      <span className={`quality-badge ${latest?.quality ?? "low"}`}>{latest?.quality ?? "low"}</span>
+                      <span className={`quality-badge ${qualityLabel}`}>{qualityLabel}</span>
                       <button
                         type="button"
                         className="chart-btn"

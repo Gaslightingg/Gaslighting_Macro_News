@@ -109,6 +109,7 @@ class MacroLatestItem(BaseModel):
     stale_after_seconds: int
     quality: str
     error: str | None = None
+    reason: str | None = None
     stale: bool | None = None
 
 

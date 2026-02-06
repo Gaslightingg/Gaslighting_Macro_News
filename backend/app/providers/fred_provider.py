@@ -25,7 +25,7 @@ class FredClient:
         sort_order: str = "desc",
         retries: int = 2,
         observation_start: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], str | None]:
         url = "https://api.stlouisfed.org/fred/series/observations"
         params = {
             "api_key": self.api_key,
@@ -42,21 +42,28 @@ class FredClient:
                 response = await self._client.get(url, params=params)
                 response.raise_for_status()
                 payload = response.json()
-                return payload.get("observations", [])
+                return payload.get("observations", []), None
             except httpx.HTTPStatusError as exc:
                 status_code = exc.response.status_code
                 if 400 <= status_code < 500:
-                    logger.warning("FRED returned %s for %s; skipping series", status_code, series_id)
-                    return []
+                    redacted_params = {k: v for k, v in params.items() if k != "api_key"}
+                    logger.warning(
+                        "FRED returned %s for series=%s; params=%s",
+                        status_code,
+                        series_id,
+                        redacted_params,
+                    )
+                    # TODO: verify FRED series id if 4xx persists.
+                    return [], f"FRED {status_code} (invalid series id?)"
                 attempt += 1
                 if attempt > retries:
                     logger.warning("FRED request failed for %s: %s", series_id, exc)
-                    return []
+                    return [], "FRED request failed"
             except httpx.HTTPError as exc:
                 attempt += 1
                 if attempt > retries:
                     logger.warning("FRED request failed for %s: %s", series_id, exc)
-                    return []
+                    return [], "FRED request failed"
 
     async def close(self) -> None:
         await self._client.aclose()

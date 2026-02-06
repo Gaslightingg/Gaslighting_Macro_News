@@ -58,6 +58,9 @@ def _install_logging_filters(token: str) -> None:
 
 async def start_bot() -> Application | None:
     load_dotenv()
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("telegram").setLevel(logging.WARNING)
+    logging.getLogger("telegram.ext").setLevel(logging.WARNING)
     enabled_raw = os.getenv("TELEGRAM_ENABLED", "true")
     token_present = bool(os.getenv("TELEGRAM_BOT_TOKEN", "").strip())
     allowed_user_id = os.getenv("TELEGRAM_ALLOWED_USER_ID", "").strip() or "missing"

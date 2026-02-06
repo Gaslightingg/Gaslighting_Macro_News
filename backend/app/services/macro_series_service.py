@@ -99,12 +99,14 @@ async def _fetch_series(
         return [], "FRED API key not configured"
 
     async with semaphore:
-        observations = await client.get_series_observations(
+        observations, error_reason = await client.get_series_observations(
             fred_series_id,
             limit=limit,
             observation_start=observation_start,
         )
 
+    if error_reason:
+        return [], error_reason
     points = parse_fred_points(observations)
     if points:
         return list(reversed(points)), None
@@ -193,9 +195,9 @@ async def get_latest_payload() -> MacroLatestResponse:
         cached_payload["stale"] = cached_payload.get("stale", False)
         missing_inputs: list[str] = []
         if not settings.fred_api_key:
-            missing_inputs.append("FRED_API_KEY missing")
+            missing_inputs.append("FRED API key not configured")
         if not settings.bea_api_key:
-            missing_inputs.append("BEA_API_KEY missing")
+            missing_inputs.append("BEA API key not configured")
         cached_payload["missing_inputs"] = missing_inputs
         cached_payload.setdefault("errors", [])
         return MacroLatestResponse(**cached_payload)
@@ -209,15 +211,15 @@ async def get_latest_payload() -> MacroLatestResponse:
     semaphore = asyncio.Semaphore(6)
 
     if not settings.fred_api_key:
-        missing_inputs.append("FRED_API_KEY missing")
+        missing_inputs.append("FRED API key not configured")
     if not settings.bea_api_key:
-        missing_inputs.append("BEA_API_KEY missing")
+        missing_inputs.append("BEA API key not configured")
 
     def source_missing_reason(indicator: MacroIndicator) -> str | None:
         if indicator.source.upper() == "FRED" and not settings.fred_api_key:
-            return "FRED_API_KEY missing"
+            return "FRED API key not configured"
         if indicator.source.upper() == "BEA" and not settings.bea_api_key:
-            return "BEA_API_KEY missing"
+            return "BEA API key not configured"
         return None
 
     def no_data_reason(indicator: MacroIndicator) -> str | None:
@@ -246,8 +248,9 @@ async def get_latest_payload() -> MacroLatestResponse:
                     history_points=len(cache.get_series(indicator.id) or []),
                     expected_frequency=indicator.frequency,
                     stale_after_seconds=_stale_after_seconds(indicator.frequency),
-                    quality="low",
+                    quality="disabled",
                     error=missing_reason,
+                    reason=missing_reason,
                     stale=True if cached_latest else None,
                 )
             )
@@ -283,8 +286,9 @@ async def get_latest_payload() -> MacroLatestResponse:
                     history_points=0,
                     expected_frequency=indicator.frequency,
                     stale_after_seconds=_stale_after_seconds(indicator.frequency),
-                    quality="low",
+                    quality="disabled",
                     error=no_data,
+                    reason=no_data,
                 )
             )
             errors.append(no_data)
@@ -304,6 +308,7 @@ async def get_latest_payload() -> MacroLatestResponse:
                     cached_error = cached_latest.error or ("No data available" if cached_status == "no_data" else None)
                     if cached_error:
                         errors.append(cached_error)
+                cached_reason = cached_latest.error or ("No data available" if cached_status == "no_data" else None)
                 latest_items.append(
                     MacroLatestItem(
                         indicator_id=indicator.id,
@@ -319,7 +324,8 @@ async def get_latest_payload() -> MacroLatestResponse:
                         expected_frequency=indicator.frequency,
                         stale_after_seconds=_stale_after_seconds(indicator.frequency),
                         quality=cached_latest.quality or "low",
-                        error=cached_latest.error or ("No data available" if cached_status == "no_data" else None),
+                        error=cached_reason,
+                        reason=cached_reason,
                         stale=cached_status != "cached",
                     )
                 )
@@ -342,6 +348,9 @@ async def get_latest_payload() -> MacroLatestResponse:
             quality = cached_latest.quality
         if not points and error:
             errors.append(error)
+        if error and error.startswith("FRED 400"):
+            status = "error"
+            quality = "disabled"
         latest_items.append(
             MacroLatestItem(
                 indicator_id=indicator.id,
@@ -358,6 +367,7 @@ async def get_latest_payload() -> MacroLatestResponse:
                 stale_after_seconds=_stale_after_seconds(indicator.frequency),
                 quality=quality,
                 error=error if not points else None,
+                reason=error if not points else None,
                 stale=status != "live",
             )
         )

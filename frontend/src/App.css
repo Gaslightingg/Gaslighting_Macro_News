@@ -446,7 +446,9 @@ body {
 .status-badge.disabled,
 .status-badge.no_data,
 .status-badge.error,
-.quality-badge.low {
+.quality-badge.low,
+.quality-badge.disabled,
+.quality-badge.n\\/a {
   color: var(--short);
   border-color: color-mix(in srgb, var(--short), transparent 50%);
 }
