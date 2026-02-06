@@ -4,17 +4,17 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from ..providers.news_provider import NewsEvent, StaticNewsProvider, build_news_provider
+from ..providers.news_provider import NewsEvent
 from ..services.price_catalog import PRICE_TICKERS
 from ..utils.price_history_db import PriceHistoryStore
 from ..utils.news_db import NewsStore
 from ..utils.settings import get_settings
+from ..services.news_sync import sync_news_range
 
 _NEWS_CACHE: dict[str, Any] = {"updated_at": None, "payload": None}
 _NEWS_CACHE_TTL = timedelta(minutes=15)
 _store: NewsStore | None = None
 _store_lock = asyncio.Lock()
-_provider = build_news_provider()
 
 WINDOWS = {
     "15m": timedelta(minutes=15),
@@ -46,19 +46,14 @@ def _iso(dt: datetime) -> str:
 
 async def sync_news(months_back: int = 6, months_forward: int = 1) -> dict[str, int | str]:
     store = await _get_store()
-    now = datetime.now(timezone.utc)
-    start = _add_months(now, -months_back)
-    end = _add_months(now, months_forward)
-
-    events = await _provider.list_events(start=start, end=end)
-    if not events:
-        events = await StaticNewsProvider().list_events(start=start, end=end)
-
-    await store.upsert_events([event.__dict__ for event in events])
-    computed = await _compute_impacts_for_events(store, events)
+    sync_result = await sync_news_range(store, months_back=months_back, months_forward=months_forward)
+    start = _add_months(datetime.now(timezone.utc), -months_back)
+    end = _add_months(datetime.now(timezone.utc), months_forward)
+    events = await store.list_events(_iso(start), _iso(end))
+    computed = await _compute_impacts_for_events(store, [_row_to_event(e) for e in events])
     return {
-        "created": len(events),
-        "updated": len(events),
+        "created": sync_result.get("created", 0),
+        "updated": sync_result.get("updated", 0),
         "impacts_computed": computed,
     }
 
@@ -189,6 +184,25 @@ def _event_with_impact(event: dict, impacts: list[dict]) -> dict:
         "surprise": surprise,
         "surprise_pct": surprise_pct,
     }
+
+
+def _row_to_event(row: dict) -> NewsEvent:
+    return NewsEvent(
+        id=row["id"],
+        source=row["source"],
+        title=row["title"],
+        country=row["country"],
+        importance=row["importance"],
+        datetime_utc=row["datetime_utc"],
+        datetime_local=row["datetime_local"],
+        unit=row.get("unit"),
+        previous=row.get("previous"),
+        forecast=row.get("forecast"),
+        actual=row.get("actual"),
+        revised=row.get("revised"),
+        status=row["status"],
+        updated_at=row["updated_at"],
+    )
 
 
 async def get_news_payload(

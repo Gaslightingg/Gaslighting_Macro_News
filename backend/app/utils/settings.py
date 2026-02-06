@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     cache_ttl_prices: int = Field(default=180, validation_alias="CACHE_TTL_PRICES")
     cache_ttl_signals: int = Field(default=600, validation_alias="CACHE_TTL_SIGNALS")
     news_provider: str = Field(default="auto", validation_alias="NEWS_PROVIDER")
+    tradingeconomics_api_key: Optional[str] = Field(default=None, validation_alias="TRADINGECONOMICS_API_KEY")
 
     def resolved_database_path(self) -> Path:
         path = Path(self.database_path)

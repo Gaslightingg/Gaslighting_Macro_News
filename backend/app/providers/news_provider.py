@@ -44,9 +44,10 @@ class NewsProvider(Protocol):
 
 class TradingViewNewsProvider:
     base_url = "https://economic-calendar.tradingview.com/events"
+    _last_forbidden_log: datetime | None = None
 
     def __init__(self) -> None:
-        self._client = httpx.AsyncClient(timeout=12.0)
+        self._client = httpx.AsyncClient(timeout=8.0)
 
     async def list_events(
         self,
@@ -65,6 +66,15 @@ class TradingViewNewsProvider:
             resp = await self._client.get(self.base_url, params=params)
             resp.raise_for_status()
             payload = resp.json()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 403:
+                now = datetime.now(timezone.utc)
+                if self._last_forbidden_log is None or now - self._last_forbidden_log > timedelta(hours=1):
+                    logger.warning("TradingView news provider blocked (403); disabling temporarily")
+                    self._last_forbidden_log = now
+                return []
+            logger.warning("TradingView news provider failed: %s", exc)
+            return []
         except Exception as exc:
             logger.warning("TradingView news provider failed: %s", exc)
             return []
@@ -160,6 +170,77 @@ class StaticNewsProvider:
         return None
 
 
+class TradingEconomicsNewsProvider:
+    base_url = "https://api.tradingeconomics.com/calendar"
+
+    def __init__(self, api_key: str) -> None:
+        self._api_key = api_key
+        self._client = httpx.AsyncClient(timeout=8.0)
+
+    async def list_events(
+        self,
+        start: datetime,
+        end: datetime,
+        countries: list[str] | None = None,
+        importance: list[str] | None = None,
+    ) -> list[NewsEvent]:
+        params = {
+            "d1": start.strftime("%Y-%m-%d"),
+            "d2": end.strftime("%Y-%m-%d"),
+            "c": self._api_key,
+        }
+        if countries:
+            params["country"] = ",".join(c.upper() for c in countries)
+        try:
+            resp = await self._client.get(self.base_url, params=params)
+            resp.raise_for_status()
+            payload = resp.json()
+        except httpx.HTTPStatusError as exc:
+            logger.warning("TradingEconomics provider failed: %s", exc)
+            return []
+        except Exception as exc:
+            logger.warning("TradingEconomics provider failed: %s", exc)
+            return []
+
+        if not isinstance(payload, list):
+            return []
+
+        out: list[NewsEvent] = []
+        now = datetime.now(timezone.utc)
+        for row in payload:
+            dt_raw = row.get("Date") or row.get("date")
+            if not dt_raw:
+                continue
+            try:
+                dt = datetime.fromisoformat(str(dt_raw).replace("Z", "+00:00")).astimezone(timezone.utc)
+            except ValueError:
+                continue
+            impact = str(row.get("Importance") or row.get("importance") or "MED").upper()
+            if impact not in {"LOW", "MED", "HIGH"}:
+                impact = "HIGH" if impact in {"3", "4"} else "MED" if impact in {"2"} else "LOW"
+            event = NewsEvent(
+                id=f"te:{row.get('CalendarId', row.get('Event', 'event'))}:{dt.strftime('%Y%m%d%H%M')}",
+                source="tradingeconomics",
+                title=row.get("Event") or row.get("event") or "Macro event",
+                country=str(row.get("Country") or row.get("country") or "US").upper(),
+                importance=impact,
+                datetime_utc=dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                datetime_local=dt.astimezone().strftime("%Y-%m-%dT%H:%M:%S%z"),
+                unit=row.get("Unit"),
+                previous=_to_text(row.get("Previous")),
+                forecast=_to_text(row.get("Forecast")),
+                actual=_to_text(row.get("Actual")),
+                revised=_to_text(row.get("Revised")),
+                status="RELEASED" if row.get("Actual") not in (None, "") or dt <= now else "UPCOMING",
+                updated_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )
+            out.append(event)
+        return out
+
+    async def get_event_details(self, event_id: str) -> NewsEvent | None:
+        return None
+
+
 def _to_text(value: object) -> str | None:
     if value is None:
         return None
@@ -170,6 +251,9 @@ def _to_text(value: object) -> str | None:
 def build_news_provider() -> NewsProvider:
     settings = get_settings()
     mode = getattr(settings, "news_provider", "auto")
-    if mode in {"tradingview", "auto"}:
+    if mode in {"tradingeconomics", "auto"}:
+        api_key = getattr(settings, "tradingeconomics_api_key", None) or "guest:guest"
+        return TradingEconomicsNewsProvider(api_key)
+    if mode == "tradingview":
         return TradingViewNewsProvider()
     return StaticNewsProvider()
