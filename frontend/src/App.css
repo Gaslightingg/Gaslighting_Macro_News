@@ -197,9 +197,75 @@ body {
 .page-news {
   min-height: 920px;
   display: grid;
-  align-content: center;
-  justify-items: center;
+  align-content: start;
+  gap: 14px;
 }
+
+.news-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.news-filters {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.news-filters select,
+.news-filters input {
+  border-radius: 10px;
+  border: 1px solid var(--panel-border);
+  background: rgba(14, 20, 30, 0.8);
+  color: var(--text-primary);
+  padding: 8px 10px;
+}
+
+.news-table-wrap {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+
+.news-table-head,
+.news-row {
+  display: grid;
+  grid-template-columns: 1.1fr 1.5fr 0.45fr 0.55fr 0.6fr 0.6fr 0.6fr 0.6fr 1.3fr;
+  gap: 10px;
+  align-items: center;
+  font-size: 12px;
+}
+
+.news-table-head {
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.news-row {
+  border-top: 1px solid rgba(120, 138, 168, 0.16);
+  padding-top: 10px;
+}
+
+.impact-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.impact-chip {
+  font-style: normal;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-pill);
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+.impact-chip.long { color: var(--long); border-color: color-mix(in srgb, var(--long), transparent 50%); }
+.impact-chip.short { color: var(--short); border-color: color-mix(in srgb, var(--short), transparent 50%); }
+.impact-chip.flat { color: var(--flat); border-color: color-mix(in srgb, var(--flat), transparent 55%); }
 
 .news-placeholder {
   text-align: center;
@@ -729,6 +795,9 @@ body {
   .app { width: min(100% - 24px, 1200px); padding-top: var(--space-3); }
   .view-slider-viewport,
   .page-news { min-height: 760px; }
+  .news-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .news-table-head,
+  .news-row { grid-template-columns: 1fr; gap: 4px; }
   .hero { flex-direction: column; }
   .meta-stack { width: 100%; }
   .meta-chip { text-align: left; }

@@ -15,6 +15,9 @@ from ..models.schemas import (
     SignalCard,
     SignalsApiResponse,
     SignalsDebugResponse,
+    NewsResponse,
+    NewsEventItem,
+    NewsSyncResponse,
 )
 from ..services.macro_series_service import (
     clear_cache,
@@ -31,6 +34,7 @@ from ..services.signal_service import (
     get_signals_payload,
     recompute_signals_payload,
 )
+from ..services.news_service import get_news_event_payload, get_news_payload, sync_news
 
 router = APIRouter(prefix="/api")
 
@@ -113,3 +117,37 @@ async def signals_debug() -> SignalsDebugResponse:
 @router.post("/signals/recompute", response_model=RecomputeResponse)
 async def recompute_signals() -> RecomputeResponse:
     return await recompute_signals_payload()
+
+
+@router.get("/news", response_model=NewsResponse)
+async def news(
+    start: str,
+    end: str,
+    country: str | None = None,
+    status: str | None = None,
+    importance: str | None = None,
+    search: str | None = None,
+) -> NewsResponse:
+    payload = await get_news_payload(
+        start=start,
+        end=end,
+        country=country,
+        status=status,
+        importance=importance,
+        search=search,
+    )
+    return NewsResponse(**payload)
+
+
+@router.get("/news/{event_id}", response_model=NewsEventItem)
+async def news_event(event_id: str) -> NewsEventItem:
+    payload = await get_news_event_payload(event_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="News event not found")
+    return NewsEventItem(**payload)
+
+
+@router.post("/news/sync", response_model=NewsSyncResponse)
+async def news_sync(days_past: int = 14, days_future: int = 30) -> NewsSyncResponse:
+    result = await sync_news(days_past=days_past, days_future=days_future)
+    return NewsSyncResponse(ok=True, **result)

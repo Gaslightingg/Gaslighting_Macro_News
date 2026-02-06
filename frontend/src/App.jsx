@@ -15,6 +15,7 @@ const REFRESH_INTERVAL_MS = 60 * 60 * 1000;
 const DEFAULT_RANGE = "1y";
 const RANGE_OPTIONS = ["1y", "2y", "5y", "max"];
 const PRICE_RANGE_OPTIONS = ["1m", "3m", "6m", "1y", "2y", "5y", "10y", "max"];
+const NEWS_REFRESH_MS = 90 * 1000;
 
 const formatChange = (value) => `${value > 0 ? "+" : ""}${value.toFixed(2)}`;
 const formatValue = (value, unit) => {
@@ -565,6 +566,16 @@ function App() {
   const [now, setNow] = useState(new Date());
   const [activeView, setActiveView] = useState(initialView);
   const touchStartXRef = useRef(null);
+  const [newsPayload, setNewsPayload] = useState({ updated_at: null, provider_status: "ok", events: [] });
+  const [newsLoading, setNewsLoading] = useState(false);
+  const [newsError, setNewsError] = useState(null);
+  const [newsFilters, setNewsFilters] = useState({
+    range: "this_week",
+    country: "ALL",
+    importance: "ALL",
+    status: "ALL",
+    search: "",
+  });
 
   useEffect(() => {
     let timeoutId;
@@ -617,6 +628,56 @@ function App() {
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
   }, []);
+
+  useEffect(() => {
+    if (activeView !== "news") return;
+    const controller = new AbortController();
+
+    const resolveRange = () => {
+      const n = new Date();
+      const start = new Date(n);
+      const end = new Date(n);
+      if (newsFilters.range === "today") {
+        // same day
+      } else if (newsFilters.range === "next_week") {
+        start.setDate(start.getDate() + 7);
+        end.setDate(end.getDate() + 14);
+      } else {
+        end.setDate(end.getDate() + 7);
+      }
+      return {
+        start: start.toISOString().slice(0, 10),
+        end: end.toISOString().slice(0, 10),
+      };
+    };
+
+    const loadNews = async () => {
+      setNewsLoading(true);
+      const { start, end } = resolveRange();
+      const params = new URLSearchParams({ start, end });
+      if (newsFilters.country !== "ALL") params.set("country", newsFilters.country);
+      if (newsFilters.importance !== "ALL") params.set("importance", newsFilters.importance);
+      if (newsFilters.status !== "ALL") params.set("status", newsFilters.status);
+      if (newsFilters.search.trim()) params.set("search", newsFilters.search.trim());
+      try {
+        const data = await fetchJson(`${API_BASE}/api/news?${params.toString()}`, controller.signal);
+        setNewsPayload(data ?? { updated_at: null, provider_status: "ok", events: [] });
+        setNewsError(null);
+      } catch (err) {
+        if (isAbortError(err)) return;
+        setNewsError(err instanceof Error ? err.message : "Failed to load news");
+      } finally {
+        setNewsLoading(false);
+      }
+    };
+
+    loadNews();
+    const id = setInterval(loadNews, NEWS_REFRESH_MS);
+    return () => {
+      controller.abort();
+      clearInterval(id);
+    };
+  }, [activeView, newsFilters]);
 
   useEffect(() => {
     const url = new URL(window.location.href);
@@ -844,9 +905,66 @@ function App() {
       </main>
 
       <section className="view-page page-news panel fade-up" aria-label="News view placeholder">
-        <div className="news-placeholder">
-          <h2>News</h2>
-          <p>News (coming soon)</p>
+        <div className="news-header-row">
+          <h2>Economic / News Calendar</h2>
+          <span className="section-meta">Updated {newsPayload.updated_at ?? "—"}</span>
+        </div>
+        <div className="news-filters">
+          <select value={newsFilters.range} onChange={(e) => setNewsFilters((p) => ({ ...p, range: e.target.value }))}>
+            <option value="today">Today</option>
+            <option value="this_week">This week</option>
+            <option value="next_week">Next week</option>
+          </select>
+          <select value={newsFilters.country} onChange={(e) => setNewsFilters((p) => ({ ...p, country: e.target.value }))}>
+            <option value="ALL">All countries</option>
+            <option value="US">US</option>
+            <option value="EU">EU</option>
+            <option value="UK">UK</option>
+            <option value="JP">JP</option>
+          </select>
+          <select value={newsFilters.importance} onChange={(e) => setNewsFilters((p) => ({ ...p, importance: e.target.value }))}>
+            <option value="ALL">All importance</option>
+            <option value="HIGH">High</option>
+            <option value="MED">Medium</option>
+            <option value="LOW">Low</option>
+          </select>
+          <select value={newsFilters.status} onChange={(e) => setNewsFilters((p) => ({ ...p, status: e.target.value }))}>
+            <option value="ALL">All status</option>
+            <option value="UPCOMING">Upcoming</option>
+            <option value="RELEASED">Released</option>
+          </select>
+          <input
+            value={newsFilters.search}
+            onChange={(e) => setNewsFilters((p) => ({ ...p, search: e.target.value }))}
+            placeholder="Search event"
+          />
+        </div>
+        {newsError ? <div className="terminal-state error">{newsError}</div> : null}
+        <div className="news-table-wrap">
+          <div className="news-table-head">
+            <span>Date/Time</span><span>Event</span><span>Country</span><span>Importance</span><span>Previous</span><span>Forecast</span><span>Actual</span><span>Status</span><span>Impact</span>
+          </div>
+          {(newsPayload.events ?? []).map((event) => (
+            <div className="news-row" key={event.id}>
+              <span>{event.datetime_local}</span>
+              <span>{event.title}</span>
+              <span>{event.country}</span>
+              <span>{event.importance}</span>
+              <span>{event.previous ?? "—"}</span>
+              <span>{event.forecast ?? "—"}</span>
+              <span>{event.actual ?? "—"}</span>
+              <span className={`status ${event.status === "RELEASED" ? "long" : "flat"}`}>{event.status}</span>
+              <span className="impact-badges">
+                {Object.entries(event.impacts ?? {}).map(([ticker, windows]) => {
+                  const w = windows["15m"] ?? windows["1h"] ?? windows["1d"];
+                  if (!w) return null;
+                  return <em key={ticker} className={`impact-chip ${w.direction.toLowerCase()}`}>{ticker}: {w.direction} {typeof w.move === "number" ? `${w.move.toFixed(2)}%` : "—"}</em>;
+                })}
+              </span>
+            </div>
+          ))}
+          {newsLoading ? <div className="muted">Refreshing news…</div> : null}
+          {!newsLoading && !(newsPayload.events ?? []).length ? <div className="muted">No events in selected range.</div> : null}
         </div>
       </section>
       </div>

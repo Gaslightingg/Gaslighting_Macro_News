@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import List
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 class PriceHistoryPoint(BaseModel):
@@ -234,3 +234,44 @@ class SignalsResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     version: str
+
+
+class NewsImpactWindow(BaseModel):
+    direction: str
+    move: float | None
+    window: str
+    data_quality: str
+    reason: str | None = None
+
+
+class NewsEventItem(BaseModel):
+    id: str
+    source: str
+    title: str
+    country: str
+    importance: str
+    datetime_utc: str
+    datetime_local: str
+    unit: str | None = None
+    previous: str | None = None
+    forecast: str | None = None
+    actual: str | None = None
+    revised: str | None = None
+    status: str
+    updated_at: str
+    surprise: float | None = None
+    surprise_pct: float | None = None
+    impacts: dict[str, dict[str, NewsImpactWindow]] = Field(default_factory=dict)
+
+
+class NewsResponse(BaseModel):
+    updated_at: str
+    provider_status: str
+    events: List[NewsEventItem]
+
+
+class NewsSyncResponse(BaseModel):
+    ok: bool
+    created: int
+    updated: int
+    impacts_computed: int
