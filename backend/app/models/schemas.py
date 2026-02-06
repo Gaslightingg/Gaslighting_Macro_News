@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import List
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
 
 class PriceHistoryPoint(BaseModel):
@@ -131,6 +131,93 @@ class MacroSeriesResponse(BaseModel):
     error: str | None = None
 
 
+class FactorContributor(BaseModel):
+    indicator: str
+    contribution: float
+    zscore: float
+    delta: float
+
+
+class FactorSnapshot(BaseModel):
+    score: float | None
+    contributors: List[FactorContributor]
+    coverage: float
+
+
+class FactorsSnapshot(BaseModel):
+    updated_at: str
+    factors: dict[str, FactorSnapshot]
+    cacheStatus: str
+
+
+class SignalDebug(BaseModel):
+    score: float
+    factorScores: dict[str, float | None]
+    missingInputs: List[str]
+    cacheStatus: str
+    migrated: bool | None = None
+
+
+class SignalCard(BaseModel):
+    ticker: str
+    signal: str
+    confidence: int
+    long_pct: int | None = None
+    short_pct: int | None = None
+    direction_label: str | None = None
+    bias: str | None = None
+    bullets: List[str]
+    updated_at: str
+    debug: SignalDebug
+
+    @model_validator(mode="after")
+    def _fill_directional_defaults(self) -> "SignalCard":
+        long_pct = 50 if self.long_pct is None else int(self.long_pct)
+        short_pct = 50 if self.short_pct is None else int(self.short_pct)
+        if long_pct + short_pct != 100:
+            total = max(1, long_pct + short_pct)
+            long_pct = int(round((long_pct / total) * 100))
+            short_pct = 100 - long_pct
+        long_pct = max(0, min(100, long_pct))
+        short_pct = 100 - long_pct
+
+        self.long_pct = long_pct
+        self.short_pct = short_pct
+        if not self.direction_label:
+            self.direction_label = f"{long_pct}% long / {short_pct}% short"
+        if not self.bias:
+            self.bias = "LONG" if long_pct > 55 else "SHORT" if long_pct < 45 else "FLAT"
+        return self
+
+
+class SignalsApiResponse(BaseModel):
+    updated_at: str
+    signals: List[SignalCard]
+    errors: List[str]
+
+
+class SignalsDebugTicker(BaseModel):
+    ticker: str
+    signal: str
+    confidence: int
+    missing_inputs: List[str]
+    reason: str | None = None
+
+
+class SignalsDebugResponse(BaseModel):
+    updated_at: str
+    tickers: List[str]
+    indicator_errors: dict[str, str]
+    provider_errors: List[str]
+    tickers_debug: List[SignalsDebugTicker]
+
+
+class RecomputeResponse(BaseModel):
+    ok: bool
+    updated_at: str
+
+
+# Backward-compatible legacy signal schema (kept for internal imports/tests).
 class SignalItem(BaseModel):
     ticker: str
     direction: str
@@ -147,3 +234,45 @@ class SignalsResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     version: str
+
+
+class NewsImpactWindow(BaseModel):
+    direction: str
+    move: float | None
+    window: str
+    data_quality: str
+    reason: str | None = None
+
+
+class NewsEventItem(BaseModel):
+    id: str
+    source: str
+    title: str
+    country: str
+    importance: str
+    datetime_utc: str
+    datetime_local: str
+    unit: str | None = None
+    previous: str | None = None
+    forecast: str | None = None
+    actual: str | None = None
+    revised: str | None = None
+    status: str
+    updated_at: str
+    surprise: float | None = None
+    surprise_pct: float | None = None
+    impacts: dict[str, dict[str, NewsImpactWindow]] = Field(default_factory=dict)
+
+
+class NewsResponse(BaseModel):
+    updated_at: str
+    provider_status: str
+    events: List[NewsEventItem]
+    debug: dict | None = None
+
+
+class NewsSyncResponse(BaseModel):
+    ok: bool
+    created: int
+    updated: int
+    impacts_computed: int

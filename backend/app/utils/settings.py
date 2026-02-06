@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     cache_ttl_series_5y: int = Field(default=43200, validation_alias="CACHE_TTL_SERIES_5Y")
     cache_ttl_prices: int = Field(default=180, validation_alias="CACHE_TTL_PRICES")
     cache_ttl_signals: int = Field(default=600, validation_alias="CACHE_TTL_SIGNALS")
+    news_provider: str = Field(default="auto", validation_alias="NEWS_PROVIDER")
+    tradingeconomics_api_key: Optional[str] = Field(default=None, validation_alias="TRADINGECONOMICS_API_KEY")
+    news_timezone: str = Field(default="Europe/Moscow", validation_alias="NEWS_TIMEZONE")
 
     def resolved_database_path(self) -> Path:
         path = Path(self.database_path)
