@@ -196,6 +196,56 @@ class SignalsApiResponse(BaseModel):
     errors: List[str]
 
 
+class BacktestRequest(BaseModel):
+    tickers: List[str]
+    start_date: str
+    end_date: str
+    interval_days: int = Field(default=1, ge=1)
+    model: str | None = Field(default="signal_engine")
+
+
+class BacktestMetric(BaseModel):
+    cumulative_return: float
+    max_drawdown: float
+    win_rate: float
+    trades: int
+    avg_trade_return: float
+    sharpe: float | None
+
+
+class BacktestTrade(BaseModel):
+    entry_time: str
+    entry_price: float
+    exit_time: str
+    exit_price: float
+    pnl: float
+    return_pct: float
+    direction: str
+
+
+class BacktestSeriesPoint(BaseModel):
+    date: str
+    value: float
+    signal: str | None = None
+    position: int | None = None
+
+
+class BacktestResult(BaseModel):
+    ticker: str
+    start_date: str
+    end_date: str
+    metrics: BacktestMetric | None
+    trades: List[BacktestTrade]
+    equity_curve: List[BacktestSeriesPoint]
+    status: str
+    error: str | None = None
+    cached: bool = False
+
+
+class BacktestResponse(BaseModel):
+    results: List[BacktestResult]
+
+
 class SignalsDebugTicker(BaseModel):
     ticker: str
     signal: str
