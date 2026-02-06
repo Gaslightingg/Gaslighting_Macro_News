@@ -10,7 +10,7 @@ from ..utils.price_history_db import PriceHistoryStore
 from ..utils.news_db import NewsStore
 from ..utils.settings import get_settings
 from ..services.news_sync import sync_news_range
-from ..services.news_utils import add_months
+from ..services.news_utils import add_months, build_news_range, filter_events_by_range, get_news_timezone
 
 _NEWS_CACHE: dict[str, Any] = {"updated_at": None, "payload": None}
 _NEWS_CACHE_TTL = timedelta(minutes=15)
@@ -35,10 +35,6 @@ async def _get_store() -> NewsStore:
             db_path = get_settings().resolved_database_path()
             _store = NewsStore(db_path)
     return _store
-
-
-def _parse_date(date: str) -> datetime:
-    return datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
 
 def _iso(dt: datetime) -> str:
@@ -213,6 +209,7 @@ async def get_news_payload(
     status: str | None = None,
     importance: str | None = None,
     search: str | None = None,
+    debug: bool = False,
 ) -> dict:
     now = datetime.now(timezone.utc)
     cache_updated = _NEWS_CACHE.get("updated_at")
@@ -220,8 +217,13 @@ async def get_news_payload(
         await sync_news()
         _NEWS_CACHE["updated_at"] = now
 
+    tz = get_news_timezone()
+    date_range = build_news_range(start, end, tz)
     store = await _get_store()
-    rows = await store.list_events(_iso(_parse_date(start)), _iso(_parse_date(end) + timedelta(days=1) - timedelta(seconds=1)))
+    rows = await store.list_events(_iso(date_range.start_utc), _iso(date_range.end_utc))
+    count_before_filter = len(rows)
+    rows, range_info, normalized_times = filter_events_by_range(rows, start, end, tz)
+    count_after_filter = len(rows)
 
     if country:
         rows = [r for r in rows if r["country"] == country.upper()]
@@ -241,11 +243,23 @@ async def get_news_payload(
 
     events = [_event_with_impact(r, impacts_by_event.get(r["id"], [])) for r in rows]
 
-    return {
+    payload = {
         "updated_at": _iso(datetime.now(timezone.utc)),
         "provider_status": "ok",
         "events": events,
     }
+    if debug:
+        normalized_times_sorted = sorted(normalized_times)
+        payload["debug"] = {
+            "parsed_start": range_info.start_local.isoformat(),
+            "parsed_end": range_info.end_local.isoformat(),
+            "tz_used": str(range_info.tz),
+            "first_event_time": normalized_times_sorted[0].isoformat() if normalized_times_sorted else None,
+            "last_event_time": normalized_times_sorted[-1].isoformat() if normalized_times_sorted else None,
+            "count_before_filter": count_before_filter,
+            "count_after_filter": count_after_filter,
+        }
+    return payload
 
 
 

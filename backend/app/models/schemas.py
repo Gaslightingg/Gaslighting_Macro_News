@@ -268,6 +268,7 @@ class NewsResponse(BaseModel):
     updated_at: str
     provider_status: str
     events: List[NewsEventItem]
+    debug: dict | None = None
 
 
 class NewsSyncResponse(BaseModel):

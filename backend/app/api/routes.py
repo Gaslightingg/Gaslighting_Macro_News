@@ -127,6 +127,7 @@ async def news(
     status: str | None = None,
     importance: str | None = None,
     search: str | None = None,
+    debug: int | None = None,
 ) -> NewsResponse:
     payload = await get_news_payload(
         start=start,
@@ -135,6 +136,7 @@ async def news(
         status=status,
         importance=importance,
         search=search,
+        debug=bool(debug),
     )
     return NewsResponse(**payload)
 

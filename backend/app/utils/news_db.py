@@ -114,7 +114,7 @@ class NewsStore:
         cur = await conn.execute(
             """
             SELECT * FROM news_events
-            WHERE datetime_utc >= ? AND datetime_utc <= ?
+            WHERE datetime_utc >= ? AND datetime_utc < ?
             ORDER BY datetime_utc ASC
             """,
             (start_utc, end_utc),
