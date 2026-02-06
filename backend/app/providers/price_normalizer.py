@@ -79,7 +79,7 @@ def normalize_price_ticker(
         "error": error,
         "error_reason": error_reason,
         "tried_sources": tried_sources or [],
-        "stale": status in {"stale", "cached"},
+        "stale": status in {"stale", "cached", "seed"},
         "history_points": history_points,
         "history_meta": history_meta,
     }

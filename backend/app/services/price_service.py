@@ -5,6 +5,8 @@ import asyncio
 import csv
 import logging
 from io import StringIO
+import json
+from pathlib import Path
 
 import httpx
 
@@ -27,6 +29,40 @@ _prices_cache_lock = asyncio.Lock()
 
 _store_cache: dict[str, PriceHistoryStore] = {}
 _store_cache_lock = asyncio.Lock()
+
+_seed_cache: dict[str, dict[str, object]] | None = None
+
+
+def _load_seed_prices() -> dict[str, dict[str, object]]:
+    global _seed_cache
+    if _seed_cache is not None:
+        return _seed_cache
+    seed_path = Path(__file__).resolve().parents[1] / "data" / "seed_prices.json"
+    try:
+        with seed_path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if isinstance(payload, dict):
+            _seed_cache = payload
+        else:
+            _seed_cache = {}
+    except FileNotFoundError:
+        _seed_cache = {}
+    except json.JSONDecodeError:
+        logger.warning("Seed price file invalid JSON: %s", seed_path)
+        _seed_cache = {}
+    return _seed_cache
+
+
+def _seed_for_config(config: PriceConfig) -> dict[str, object] | None:
+    seeds = _load_seed_prices()
+    if not seeds:
+        return None
+    return (
+        seeds.get(config.id)
+        or seeds.get(config.symbol)
+        or seeds.get(config.symbol.upper())
+        or seeds.get(config.symbol.lower())
+    )
 
 
 async def _get_store() -> PriceHistoryStore:
@@ -288,6 +324,7 @@ async def _ensure_history(
     store: PriceHistoryStore,
     client: httpx.AsyncClient,
     config: PriceConfig,
+    timeout_seconds: float,
 ) -> list[HistoryPoint]:
     meta_key = f"history:{config.id}:updated_at"
     last_update = await store.get_meta(meta_key)
@@ -304,7 +341,7 @@ async def _ensure_history(
             return fresh_points
 
     fresh_points = (
-        await _fetch_yfinance_history(symbols["yfinance"], timeout_seconds=get_settings().price_fetch_timeout_seconds)
+        await _fetch_yfinance_history(symbols["yfinance"], timeout_seconds=timeout_seconds)
         if symbols.get("yfinance")
         else []
     )
@@ -319,6 +356,7 @@ async def _ensure_latest(
     store: PriceHistoryStore,
     client: httpx.AsyncClient,
     config: PriceConfig,
+    timeout_seconds: float,
 ) -> dict[str, object] | None:
     cached = await store.get_latest(config.id)
     meta_key = f"latest:{config.id}:updated_at"
@@ -358,7 +396,7 @@ async def _ensure_latest(
         tried_sources.append("yfinance")
         latest = await _fetch_yfinance_latest(
             symbols["yfinance"],
-            timeout_seconds=get_settings().price_fetch_timeout_seconds,
+            timeout_seconds=timeout_seconds,
         )
         if latest:
             value, change_pct, date = latest
@@ -396,6 +434,7 @@ async def get_prices_payload() -> PricesResponse:
     start_time = datetime.utcnow()
     settings = get_settings()
     cache_ttl = timedelta(seconds=settings.cache_ttl_prices)
+    effective_timeout = min(settings.price_fetch_timeout_seconds, 6.0)
     cache_hit = False
 
     async with _prices_cache_lock:
@@ -409,13 +448,15 @@ async def get_prices_payload() -> PricesResponse:
 
     errors: dict[str, str] = {}
     timed_out = False
-    async with httpx.AsyncClient(timeout=settings.price_fetch_timeout_seconds) as client:
+    async with httpx.AsyncClient(timeout=effective_timeout) as client:
         semaphore = asyncio.Semaphore(settings.price_fetch_concurrency)
         tasks: dict[asyncio.Task, PriceConfig] = {}
         for config in PRICE_TICKERS:
-            task = asyncio.create_task(_build_ticker_payload(config, store, client, semaphore))
+            task = asyncio.create_task(
+                _build_ticker_payload(config, store, client, semaphore, timeout_seconds=effective_timeout)
+            )
             tasks[task] = config
-        done, pending = await asyncio.wait(tasks.keys(), timeout=settings.price_fetch_timeout_seconds)
+        done, pending = await asyncio.wait(tasks.keys(), timeout=effective_timeout)
         tickers: list[dict] = []
         for task in done:
             config = tasks[task]
@@ -445,12 +486,16 @@ async def get_prices_payload() -> PricesResponse:
         timed_out=timed_out,
     )
     duration_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
-    ok_count = sum(1 for ticker in tickers if ticker.get("value") is not None)
+    ok_count = sum(1 for ticker in tickers if isinstance(ticker.get("value"), (int, float)))
+    seed_count = sum(1 for ticker in tickers if ticker.get("status") == "seed")
+    stale_count = sum(1 for ticker in tickers if ticker.get("status") in {"stale", "cached"})
     logger.info(
-        "Prices fetch completed in %.1fms (tickers=%s, ok=%s, errors=%s, timed_out=%s, cache_hit=%s)",
+        "Prices fetch completed in %.1fms (tickers=%s, updated=%s, stale=%s, seed=%s, errors=%s, timed_out=%s, cache_hit=%s)",
         duration_ms,
         len(tickers),
         ok_count,
+        stale_count,
+        seed_count,
         len(errors),
         timed_out,
         cache_hit,
@@ -466,20 +511,48 @@ async def _build_ticker_payload(
     store: PriceHistoryStore,
     client: httpx.AsyncClient,
     semaphore: asyncio.Semaphore,
+    timeout_seconds: float,
 ) -> dict:
     async with semaphore:
-        return await _build_ticker_payload_inner(config, store, client)
+        return await _build_ticker_payload_inner(config, store, client, timeout_seconds)
 
 
-async def _build_ticker_payload_inner(config: PriceConfig, store: PriceHistoryStore, client: httpx.AsyncClient) -> dict:
+async def _build_ticker_payload_inner(
+    config: PriceConfig,
+    store: PriceHistoryStore,
+    client: httpx.AsyncClient,
+    timeout_seconds: float,
+) -> dict:
     try:
-        latest = await _ensure_latest(store, client, config)
-        history = await _ensure_history(store, client, config)
+        latest = await _ensure_latest(store, client, config, timeout_seconds)
+        history = await _ensure_history(store, client, config, timeout_seconds)
         meta = _history_meta(history)
 
         spark_points = history[-SPARKLINE_POINTS:] if history else []
         history_points = [PriceHistoryPoint(date=p.date, value=p.value) for p in spark_points]
 
+        seed = _seed_for_config(config)
+        if latest is None and not history and seed:
+            return normalize_price_ticker(
+                {
+                    "id": config.id,
+                    "symbol": config.symbol,
+                    "name": config.name,
+                    "asset_class": config.asset_class,
+                    "unit": config.unit,
+                    "value": seed.get("price"),
+                    "change": seed.get("change"),
+                    "change_pct": seed.get("change_pct"),
+                    "last_updated": seed.get("as_of"),
+                    "history_points": history_points,
+                    "history_meta": meta,
+                },
+                now=datetime.utcnow(),
+                source="seed",
+                status="seed",
+                error="seeded fallback",
+                error_reason="seed_fallback",
+            )
         if latest is None and not history:
             return normalize_price_ticker(
                 {
@@ -488,12 +561,14 @@ async def _build_ticker_payload_inner(config: PriceConfig, store: PriceHistorySt
                     "name": config.name,
                     "asset_class": config.asset_class,
                     "unit": config.unit,
+                    "value": "N/A",
+                    "last_updated": "N/A",
                     "history_points": history_points,
                     "history_meta": meta,
                 },
                 now=datetime.utcnow(),
                 source=None,
-                status="error",
+                status="empty",
                 error="No price data available from stooq/yfinance",
                 error_reason="no_price_data",
             )
@@ -504,7 +579,43 @@ async def _build_ticker_payload_inner(config: PriceConfig, store: PriceHistorySt
         error_reason = (latest or {}).get("error_reason")
         if safe_status == "error" and not error_reason:
             error_reason = "no_price_data"
+        if (latest or {}).get("value") is None:
+            seed = seed or _seed_for_config(config)
+            if seed:
+                return normalize_price_ticker(
+                    {
+                        "id": config.id,
+                        "symbol": config.symbol,
+                        "name": config.name,
+                        "asset_class": config.asset_class,
+                        "unit": config.unit,
+                        "value": seed.get("price"),
+                        "change": seed.get("change"),
+                        "change_pct": seed.get("change_pct"),
+                        "last_updated": seed.get("as_of"),
+                        "history_points": history_points,
+                        "history_meta": meta,
+                    },
+                    now=datetime.utcnow(),
+                    source="seed",
+                    status="seed",
+                    error="seeded fallback",
+                    error_reason="seed_fallback",
+                    tried_sources=tried_sources,
+                )
+            safe_status = "empty"
+            error_reason = error_reason or "no_price_data"
+            latest = {
+                "value": "N/A",
+                "change": "N/A",
+                "change_pct": None,
+                "last_updated": "N/A",
+                "source": None,
+            }
 
+        resolved_source = latest.get("source") if latest else None
+        if safe_status in {"stale", "cached"} and not resolved_source:
+            resolved_source = "db"
         return normalize_price_ticker(
             {
                 "id": config.id,
@@ -520,9 +631,9 @@ async def _build_ticker_payload_inner(config: PriceConfig, store: PriceHistorySt
                 "history_meta": meta,
             },
             now=datetime.utcnow(),
-            source=latest.get("source") if safe_status == "live" else "db",
+            source=resolved_source,
             status=safe_status,
-            error=None if safe_status != "error" else "No price data available",
+            error=None if safe_status not in {"error", "empty"} else "No price data available",
             error_reason=error_reason,
             tried_sources=tried_sources,
         )
@@ -537,6 +648,49 @@ async def _build_cached_payload(config: PriceConfig, store: PriceHistoryStore, e
     meta = _history_meta(history)
     spark_points = history[-SPARKLINE_POINTS:] if history else []
     history_points = [PriceHistoryPoint(date=p.date, value=p.value) for p in spark_points]
+    if cached is None:
+        seed = _seed_for_config(config)
+        if seed:
+            return normalize_price_ticker(
+                {
+                    "id": config.id,
+                    "symbol": config.symbol,
+                    "name": config.name,
+                    "asset_class": config.asset_class,
+                    "unit": config.unit,
+                    "value": seed.get("price"),
+                    "change": seed.get("change"),
+                    "change_pct": seed.get("change_pct"),
+                    "last_updated": seed.get("as_of"),
+                    "history_points": history_points,
+                    "history_meta": meta,
+                },
+                now=datetime.utcnow(),
+                source="seed",
+                status="seed",
+                error="seeded fallback",
+                error_reason="seed_fallback",
+                tried_sources=[],
+            )
+        return normalize_price_ticker(
+            {
+                "id": config.id,
+                "symbol": config.symbol,
+                "name": config.name,
+                "asset_class": config.asset_class,
+                "unit": config.unit,
+                "value": "N/A",
+                "last_updated": "N/A",
+                "history_points": history_points,
+                "history_meta": meta,
+            },
+            now=datetime.utcnow(),
+            source=None,
+            status="empty",
+            error=error or "No cached price data",
+            error_reason="no_cached_price",
+            tried_sources=[],
+        )
     return normalize_price_ticker(
         {
             "id": config.id,
@@ -553,7 +707,7 @@ async def _build_cached_payload(config: PriceConfig, store: PriceHistoryStore, e
         },
         now=datetime.utcnow(),
         source="db",
-        status="stale" if cached else "error",
+        status="stale" if cached else "empty",
         error=error or ("No cached price data" if not cached else None),
         error_reason="fallback_db" if cached else "no_cached_price",
         tried_sources=[],
@@ -566,8 +720,10 @@ async def get_price_history_payload(symbol: str, range_key: str) -> PriceHistory
         raise ValueError(f"Unknown symbol: {symbol}")
 
     store = await _get_store()
-    async with httpx.AsyncClient(timeout=20) as client:
-        history = await _ensure_history(store, client, config)
+    settings = get_settings()
+    timeout_seconds = min(settings.price_fetch_timeout_seconds, 6.0)
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        history = await _ensure_history(store, client, config, timeout_seconds)
 
     meta = _history_meta(history)
     points = history

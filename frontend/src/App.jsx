@@ -21,14 +21,17 @@ const NEWS_PAGE_SIZE = 120;
 const CACHE_PREFIX = "gm_cache_v1:";
 const CACHE_TTL_MS = 10 * 60 * 1000;
 
-const formatChange = (value) => `${value > 0 ? "+" : ""}${value.toFixed(2)}`;
+const formatChange = (value) => {
+  if (typeof value !== "number") return "N/A";
+  return `${value > 0 ? "+" : ""}${value.toFixed(2)}`;
+};
 const formatValue = (value, unit) => {
-  if (typeof value !== "number") return "—";
+  if (typeof value !== "number") return value ?? "N/A";
   return unit ? `${value.toFixed(2)} ${unit}` : value.toFixed(2);
 };
 
 const formatPointDate = (timestamp) => {
-  if (!Number.isFinite(timestamp)) return "—";
+  if (!Number.isFinite(timestamp)) return "N/A";
   return new Date(timestamp).toISOString().slice(0, 10);
 };
 
@@ -101,7 +104,7 @@ const isAbortError = (err) => {
 };
 
 const formatCacheTime = (timestamp) => {
-  if (!timestamp) return "—";
+  if (!timestamp) return "N/A";
   return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 };
 
@@ -1004,7 +1007,7 @@ function App() {
         <div className="meta-stack">
           <div className="meta-chip">Local {now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
           <div className="meta-chip">Refresh {nextRefresh}</div>
-          <div className="meta-chip">As of {prices?.as_of ?? "—"}</div>
+          <div className="meta-chip">As of {prices?.as_of ?? "N/A"}</div>
           {mainCacheInfo ? (
             <div className={`meta-chip cache-chip ${mainCacheInfo.isStale ? "stale" : "cached"}`}>
               {mainFromCache ? "Cached" : "Updated"} {formatCacheTime(mainCacheInfo.fetchedAt)}
@@ -1034,14 +1037,14 @@ function App() {
                   <article key={ticker.id} className="panel card fade-up">
                     <div className="card-row">
                       <span className="symbol">{ticker.symbol ?? ticker.name}</span>
-                      <span className="price">{ticker.value == null ? "Unavailable" : formatValue(ticker.value, ticker.unit)}</span>
+                      <span className="price">{formatValue(ticker.value, ticker.unit)}</span>
                     </div>
-                    <p className={`change ${tone}`}>{typeof ticker.change === "number" ? formatChange(ticker.change) : "—"}</p>
+                    <p className={`change ${tone}`}>{formatChange(ticker.change)}</p>
                     <Sparkline values={ticker.history_points?.map((p) => p.value) ?? []} tone={tone} />
                     <span className="ticker-meta">
                       {ticker.history_meta?.data_start ? `Data since ${ticker.history_meta.data_start}` : "Data availability pending"}
                     </span>
-                    {ticker.value == null && (ticker.error_reason || ticker.error) ? (
+                    {typeof ticker.value !== "number" && (ticker.error_reason || ticker.error) ? (
                       <span className="ticker-meta warning">
                         {ticker.error_reason || ticker.error}
                       </span>
@@ -1086,14 +1089,14 @@ function App() {
                   const tone = typeof latest?.change === "number" && latest.change < 0 ? "negative" : "positive";
                   const status = latest?.status ?? "unknown";
                   const reason = latest?.reason ?? latest?.error;
-                  const isUnavailable = ["unavailable", "disabled", "no_data", "error"].includes(status);
-                  const updatedLabel = latest?.last_updated ?? (reason && isUnavailable ? reason : "—");
-                  const qualityLabel = isUnavailable ? (latest?.quality ?? "disabled") : (latest?.quality ?? "low");
+                  const isUnavailable = ["unavailable", "disabled", "no_data", "error", "empty", "stale"].includes(status);
+                  const updatedLabel = isUnavailable && reason ? reason : (latest?.last_updated ?? "N/A");
+                  const qualityLabel = isUnavailable ? (latest?.quality ?? "n/a") : (latest?.quality ?? "low");
                   return (
                     <div key={indicator.id} className="table-row">
                       <span className="table-title">{indicator.name}</span>
                       <span>{formatValue(latest?.value, latest?.unit)}</span>
-                      <span className={`table-change ${tone}`}>{typeof latest?.change === "number" ? formatChange(latest.change) : "—"}</span>
+                      <span className={`table-change ${tone}`}>{formatChange(latest?.change)}</span>
                       <span className={`table-date ${reason && isUnavailable ? "table-reason" : ""}`}>{updatedLabel}</span>
                       <span className={`status-badge ${status}`}>{status}</span>
                       <span className={`quality-badge ${qualityLabel}`}>{qualityLabel}</span>

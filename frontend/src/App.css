@@ -445,6 +445,7 @@ body {
 .status-badge.unavailable,
 .status-badge.disabled,
 .status-badge.no_data,
+.status-badge.empty,
 .status-badge.error,
 .quality-badge.low,
 .quality-badge.disabled,
@@ -456,6 +457,7 @@ body {
 .status.flat,
 .status-badge.cached,
 .status-badge.stale,
+.status-badge.seed,
 .quality-badge.medium {
   color: var(--flat);
   border-color: color-mix(in srgb, var(--flat), transparent 55%);

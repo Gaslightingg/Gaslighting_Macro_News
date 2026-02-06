@@ -23,8 +23,8 @@ class PriceTicker(BaseModel):
     name: str
     asset_class: str
     unit: str | None
-    value: float | None
-    change: float | None
+    value: float | str | None
+    change: float | str | None
     change_pct: float | None
     last_updated: str | None
     as_of: str | None = None
@@ -97,10 +97,11 @@ class MacroCategoriesResponse(BaseModel):
 class MacroLatestItem(BaseModel):
     indicator_id: str
     name: str
-    value: float | None
-    change: float | None
+    value: float | str
+    change: float | str
     unit: str | None
-    last_updated: str | None
+    last_updated: str
+    updated_at: str | None = None
     category: str
     status: str
     source: str | None

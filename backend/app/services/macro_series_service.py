@@ -61,6 +61,26 @@ def _observation_start_for_range(range_key: str) -> str | None:
     return (datetime.utcnow() - timedelta(days=days)).date().isoformat()
 
 
+def _format_value(value: float | None) -> float | str:
+    return value if value is not None else "N/A"
+
+
+def _format_change(value: float | None) -> float | str:
+    return value if value is not None else "N/A"
+
+
+def _format_date(value: str | None) -> str:
+    return value or "N/A"
+
+
+def _quality_for_status(status: str, base_quality: str | None) -> str:
+    if status == "live":
+        return base_quality or "high"
+    if status in {"cached", "stale"}:
+        return "medium"
+    return "n/a"
+
+
 def get_categories_payload() -> MacroCategoriesResponse:
     categories = []
     for category in ALL_CATEGORIES:
@@ -200,6 +220,15 @@ async def get_latest_payload() -> MacroLatestResponse:
             missing_inputs.append("BEA API key not configured")
         cached_payload["missing_inputs"] = missing_inputs
         cached_payload.setdefault("errors", [])
+        if isinstance(cached_payload.get("latest"), list):
+            for item in cached_payload["latest"]:
+                if isinstance(item, dict):
+                    item["value"] = _format_value(item.get("value"))
+                    item["change"] = _format_change(item.get("change"))
+                    item["last_updated"] = _format_date(item.get("last_updated"))
+                    item["updated_at"] = _format_date(item.get("updated_at") or item.get("last_updated"))
+                    status = item.get("status") or "unknown"
+                    item["quality"] = _quality_for_status(status, item.get("quality"))
         return MacroLatestResponse(**cached_payload)
 
     latest_items: list[MacroLatestItem] = []
@@ -238,20 +267,21 @@ async def get_latest_payload() -> MacroLatestResponse:
                 MacroLatestItem(
                     indicator_id=indicator.id,
                     name=indicator.name,
-                    value=cached_latest.value if cached_latest else None,
-                    change=cached_latest.change if cached_latest else None,
+                    value=_format_value(cached_latest.value if cached_latest else None),
+                    change=_format_change(cached_latest.change if cached_latest else None),
                     unit=indicator.units,
-                    last_updated=cached_latest.last_updated if cached_latest else None,
+                    last_updated=_format_date(cached_latest.last_updated if cached_latest else None),
+                    updated_at=_format_date(cached_latest.last_updated if cached_latest else None),
                     category=indicator.category,
                     status="disabled",
                     source=indicator.source,
                     history_points=len(cache.get_series(indicator.id) or []),
                     expected_frequency=indicator.frequency,
                     stale_after_seconds=_stale_after_seconds(indicator.frequency),
-                    quality="disabled",
+                    quality="n/a",
                     error=missing_reason,
                     reason=missing_reason,
-                    stale=True if cached_latest else None,
+                    stale=True if cached_latest else False,
                 )
             )
             stale_response = True
@@ -276,19 +306,21 @@ async def get_latest_payload() -> MacroLatestResponse:
                 MacroLatestItem(
                     indicator_id=indicator.id,
                     name=indicator.name,
-                    value=None,
-                    change=None,
+                    value="N/A",
+                    change="N/A",
                     unit=indicator.units,
-                    last_updated=None,
+                    last_updated="N/A",
+                    updated_at="N/A",
                     category=indicator.category,
-                    status="no_data",
+                    status="empty",
                     source=indicator.source,
                     history_points=0,
                     expected_frequency=indicator.frequency,
                     stale_after_seconds=_stale_after_seconds(indicator.frequency),
-                    quality="disabled",
+                    quality="n/a",
                     error=no_data,
                     reason=no_data,
+                    stale=False,
                 )
             )
             errors.append(no_data)
@@ -313,17 +345,18 @@ async def get_latest_payload() -> MacroLatestResponse:
                     MacroLatestItem(
                         indicator_id=indicator.id,
                         name=indicator.name,
-                        value=cached_latest.value,
-                        change=cached_latest.change,
+                        value=_format_value(cached_latest.value),
+                        change=_format_change(cached_latest.change),
                         unit=indicator.units,
-                        last_updated=cached_latest.last_updated,
+                        last_updated=_format_date(cached_latest.last_updated),
+                        updated_at=_format_date(cached_latest.last_updated),
                         category=indicator.category,
                         status=cached_status,
                         source=cached_latest.source,
                         history_points=len(cache.get_series(indicator.id) or []),
                         expected_frequency=indicator.frequency,
                         stale_after_seconds=_stale_after_seconds(indicator.frequency),
-                        quality=cached_latest.quality or "low",
+                        quality=_quality_for_status(cached_status, cached_latest.quality),
                         error=cached_reason,
                         reason=cached_reason,
                         stale=cached_status != "cached",
@@ -340,32 +373,37 @@ async def get_latest_payload() -> MacroLatestResponse:
         if not points and cached_latest and cached_latest.value is not None:
             latest_value = cached_latest.value
             change = cached_latest.change
-            error = cached_latest.error or error
+            error = cached_latest.error or error or "provider failed, using cached"
             stale_response = True
-        status = "live" if points else "cached" if cached_latest and cached_latest.value is not None else "no_data"
-        quality = "high" if indicator.source == "FRED" and points else "low"
-        if not points and cached_latest and cached_latest.quality:
-            quality = cached_latest.quality
+        status = "live" if points else "stale" if cached_latest and cached_latest.value is not None else "empty"
+        quality = "high" if indicator.source == "FRED" and points else None
         if not points and error:
             errors.append(error)
         if error and error.startswith("FRED 400"):
             status = "error"
-            quality = "disabled"
+            quality = "n/a"
+        if status in {"disabled", "error", "empty", "no_data"}:
+            quality = "n/a"
         latest_items.append(
             MacroLatestItem(
                 indicator_id=indicator.id,
                 name=indicator.name,
-                value=latest_value,
-                change=change,
+                value=_format_value(latest_value),
+                change=_format_change(change),
                 unit=indicator.units,
-                last_updated=points[-1][0] if points else cached_latest.last_updated if cached_latest else None,
+                last_updated=_format_date(
+                    points[-1][0] if points else cached_latest.last_updated if cached_latest else None
+                ),
+                updated_at=_format_date(
+                    points[-1][0] if points else cached_latest.last_updated if cached_latest else None
+                ),
                 category=indicator.category,
                 status=status,
                 source=indicator.source if points else cached_latest.source if cached_latest else indicator.source,
                 history_points=len(points) if points else len(cache.get_series(indicator.id) or []) if cached_latest else 0,
                 expected_frequency=indicator.frequency,
                 stale_after_seconds=_stale_after_seconds(indicator.frequency),
-                quality=quality,
+                quality=_quality_for_status(status, quality),
                 error=error if not points else None,
                 reason=error if not points else None,
                 stale=status != "live",
@@ -383,7 +421,7 @@ async def get_latest_payload() -> MacroLatestResponse:
                 change=change,
                 status=status,
                 source=indicator.source if points else None,
-                quality=quality,
+                quality=_quality_for_status(status, quality),
                 error=error if not points else None,
                 payload_json=None,
             )
