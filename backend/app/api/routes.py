@@ -148,6 +148,6 @@ async def news_event(event_id: str) -> NewsEventItem:
 
 
 @router.post("/news/sync", response_model=NewsSyncResponse)
-async def news_sync(days_past: int = 14, days_future: int = 30) -> NewsSyncResponse:
-    result = await sync_news(days_past=days_past, days_future=days_future)
+async def news_sync(months_back: int = 6, months_forward: int = 1) -> NewsSyncResponse:
+    result = await sync_news(months_back=months_back, months_forward=months_forward)
     return NewsSyncResponse(ok=True, **result)

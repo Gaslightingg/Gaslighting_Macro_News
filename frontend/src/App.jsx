@@ -15,7 +15,9 @@ const REFRESH_INTERVAL_MS = 60 * 60 * 1000;
 const DEFAULT_RANGE = "1y";
 const RANGE_OPTIONS = ["1y", "2y", "5y", "max"];
 const PRICE_RANGE_OPTIONS = ["1m", "3m", "6m", "1y", "2y", "5y", "10y", "max"];
-const NEWS_REFRESH_MS = 90 * 1000;
+const NEWS_REFRESH_MS = 120 * 1000;
+const DEFAULT_NEWS_RANGE = "6m_forward";
+const NEWS_PAGE_SIZE = 120;
 
 const formatChange = (value) => `${value > 0 ? "+" : ""}${value.toFixed(2)}`;
 const formatValue = (value, unit) => {
@@ -570,12 +572,13 @@ function App() {
   const [newsLoading, setNewsLoading] = useState(false);
   const [newsError, setNewsError] = useState(null);
   const [newsFilters, setNewsFilters] = useState({
-    range: "this_week",
+    range: DEFAULT_NEWS_RANGE,
     country: "ALL",
     importance: "ALL",
     status: "ALL",
     search: "",
   });
+  const [newsPage, setNewsPage] = useState(1);
 
   useEffect(() => {
     let timeoutId;
@@ -637,13 +640,24 @@ function App() {
       const n = new Date();
       const start = new Date(n);
       const end = new Date(n);
+      if (newsFilters.range === "custom" && newsFilters.start && newsFilters.end) {
+        return {
+          start: newsFilters.start,
+          end: newsFilters.end,
+        };
+      }
       if (newsFilters.range === "today") {
         // same day
+      } else if (newsFilters.range === "this_week") {
+        end.setDate(end.getDate() + 7);
+      } else if (newsFilters.range === "this_month") {
+        end.setMonth(end.getMonth() + 1);
       } else if (newsFilters.range === "next_week") {
         start.setDate(start.getDate() + 7);
         end.setDate(end.getDate() + 14);
       } else {
-        end.setDate(end.getDate() + 7);
+        start.setMonth(start.getMonth() - 6);
+        end.setMonth(end.getMonth() + 1);
       }
       return {
         start: start.toISOString().slice(0, 10),
@@ -678,6 +692,10 @@ function App() {
       clearInterval(id);
     };
   }, [activeView, newsFilters]);
+
+  useEffect(() => {
+    setNewsPage(1);
+  }, [newsFilters]);
 
   useEffect(() => {
     const url = new URL(window.location.href);
@@ -913,8 +931,25 @@ function App() {
           <select value={newsFilters.range} onChange={(e) => setNewsFilters((p) => ({ ...p, range: e.target.value }))}>
             <option value="today">Today</option>
             <option value="this_week">This week</option>
+            <option value="this_month">This month</option>
             <option value="next_week">Next week</option>
+            <option value="6m_forward">6M back + 1M forward</option>
+            <option value="custom">Custom</option>
           </select>
+          {newsFilters.range === "custom" ? (
+            <div className="news-date-range">
+              <input
+                type="date"
+                value={newsFilters.start ?? ""}
+                onChange={(e) => setNewsFilters((p) => ({ ...p, start: e.target.value }))}
+              />
+              <input
+                type="date"
+                value={newsFilters.end ?? ""}
+                onChange={(e) => setNewsFilters((p) => ({ ...p, end: e.target.value }))}
+              />
+            </div>
+          ) : null}
           <select value={newsFilters.country} onChange={(e) => setNewsFilters((p) => ({ ...p, country: e.target.value }))}>
             <option value="ALL">All countries</option>
             <option value="US">US</option>
@@ -944,7 +979,7 @@ function App() {
           <div className="news-table-head">
             <span>Date/Time</span><span>Event</span><span>Country</span><span>Importance</span><span>Previous</span><span>Forecast</span><span>Actual</span><span>Status</span><span>Impact</span>
           </div>
-          {(newsPayload.events ?? []).map((event) => (
+          {(newsPayload.events ?? []).slice(0, newsPage * NEWS_PAGE_SIZE).map((event) => (
             <div className="news-row" key={event.id}>
               <span>{event.datetime_local}</span>
               <span>{event.title}</span>
@@ -955,14 +990,19 @@ function App() {
               <span>{event.actual ?? "—"}</span>
               <span className={`status ${event.status === "RELEASED" ? "long" : "flat"}`}>{event.status}</span>
               <span className="impact-badges">
-                {Object.entries(event.impacts ?? {}).map(([ticker, windows]) => {
+                {event.status === "RELEASED" ? Object.entries(event.impacts ?? {}).map(([ticker, windows]) => {
                   const w = windows["15m"] ?? windows["1h"] ?? windows["1d"];
                   if (!w) return null;
-                  return <em key={ticker} className={`impact-chip ${w.direction.toLowerCase()}`}>{ticker}: {w.direction} {typeof w.move === "number" ? `${w.move.toFixed(2)}%` : "—"}</em>;
-                })}
+                  return <em key={ticker} className={`impact-chip ${w.direction.toLowerCase()}`}>{ticker}: {typeof w.move === "number" ? `${w.move.toFixed(2)}%` : "N/A"}</em>;
+                }) : "—"}
               </span>
             </div>
           ))}
+          {newsPayload.events && newsPayload.events.length > newsPage * NEWS_PAGE_SIZE ? (
+            <button type="button" className="chart-btn" onClick={() => setNewsPage((p) => p + 1)}>
+              Load more
+            </button>
+          ) : null}
           {newsLoading ? <div className="muted">Refreshing news…</div> : null}
           {!newsLoading && !(newsPayload.events ?? []).length ? <div className="muted">No events in selected range.</div> : null}
         </div>

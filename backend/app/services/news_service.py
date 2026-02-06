@@ -44,11 +44,11 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-async def sync_news(days_past: int = 14, days_future: int = 30) -> dict[str, int | str]:
+async def sync_news(months_back: int = 6, months_forward: int = 1) -> dict[str, int | str]:
     store = await _get_store()
     now = datetime.now(timezone.utc)
-    start = now - timedelta(days=days_past)
-    end = now + timedelta(days=days_future)
+    start = _add_months(now, -months_back)
+    end = _add_months(now, months_forward)
 
     events = await _provider.list_events(start=start, end=end)
     if not events:
@@ -142,7 +142,7 @@ def _impact_from_history(event_id: str, ticker: str, window: str, t0: datetime, 
     ret = ((post[1] - pre[1]) / pre[1]) * 100
     th = THRESHOLDS[window]
     direction = "LONG" if ret >= th else "SHORT" if ret <= -th else "FLAT"
-    quality = "GOOD" if window == "1d" else "ESTIMATED"
+    quality = "GOOD" if window == "1d" else "DAILY_PROXY"
     return {
         "event_id": event_id,
         "ticker": ticker,
@@ -231,6 +231,22 @@ async def get_news_payload(
         "provider_status": "ok",
         "events": events,
     }
+
+
+def _add_months(dt: datetime, months: int) -> datetime:
+    month = dt.month - 1 + months
+    year = dt.year + month // 12
+    month = month % 12 + 1
+    day = min(dt.day, _days_in_month(year, month))
+    return dt.replace(year=year, month=month, day=day)
+
+
+def _days_in_month(year: int, month: int) -> int:
+    if month == 12:
+        next_month = datetime(year + 1, 1, 1)
+    else:
+        next_month = datetime(year, month + 1, 1)
+    return (next_month - datetime(year, month, 1)).days
 
 
 async def get_news_event_payload(event_id: str) -> dict | None:
