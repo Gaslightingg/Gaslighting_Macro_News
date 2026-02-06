@@ -27,7 +27,33 @@ def build_application(config: BotConfig) -> Application:
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CallbackQueryHandler(on_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    application.add_error_handler(_handle_bot_error)
     return application
+
+
+async def _handle_bot_error(update, context) -> None:  # noqa: ANN001
+    logger.warning("Telegram bot error: %s", context.error)
+
+
+class _TokenMaskFilter(logging.Filter):
+    def __init__(self, token: str) -> None:
+        super().__init__()
+        self._token = token
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not self._token:
+            return True
+        message = record.getMessage()
+        if self._token in message:
+            record.msg = message.replace(self._token, "***")
+            record.args = ()
+        return True
+
+
+def _install_logging_filters(token: str) -> None:
+    token_filter = _TokenMaskFilter(token)
+    for logger_name in ("telegram", "httpx", "httpcore"):
+        logging.getLogger(logger_name).addFilter(token_filter)
 
 
 async def start_bot() -> Application | None:
@@ -44,13 +70,15 @@ async def start_bot() -> Application | None:
     if enabled_raw.strip().lower() in {"0", "false", "no", "off"}:
         logger.info("Telegram bot disabled via TELEGRAM_ENABLED")
         return None
-    if not os.getenv("TELEGRAM_BOT_TOKEN", "").strip():
+    token_value = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token_value:
         logger.info("Telegram bot disabled: TELEGRAM_BOT_TOKEN not set")
         return None
     config = load_config_optional()
     if config is None or not config.allowed_user_ids:
         logger.info("Telegram bot disabled: TELEGRAM_ALLOWED_USER_ID not set")
         return None
+    _install_logging_filters(token_value)
 
     logger.info("Starting Telegram bot…")
     application = build_application(config)

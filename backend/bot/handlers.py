@@ -4,6 +4,7 @@ import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from .api_client import ApiClient
@@ -70,7 +71,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("Access denied.")
         return
     text = "Welcome! Use the buttons below to navigate."
-    await update.effective_message.reply_text(text, reply_markup=build_menu())
+    await update.effective_message.reply_text(text, reply_markup=build_menu(), parse_mode=ParseMode.HTML)
 
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -78,7 +79,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _allowed(update, config):
         await update.effective_message.reply_text("Access denied.")
         return
-    await update.effective_message.reply_text("Menu:", reply_markup=build_menu())
+    await update.effective_message.reply_text("Menu:", reply_markup=build_menu(), parse_mode=ParseMode.HTML)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -87,14 +88,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text("Access denied.")
         return
     text = (
-        "ℹ️ *Help*\n"
+        "ℹ️ <b>Help</b>\n"
         "Just tap the buttons below — commands are optional.\n\n"
-        "Commands:\n"
+        "<b>Commands:</b>\n"
         "/start — main menu\n"
         "/help — this help message\n"
         "/status — system status"
     )
-    await update.effective_message.reply_text(text, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text(text, reply_markup=build_menu(), parse_mode=ParseMode.HTML)
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -110,11 +111,36 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.effective_message.reply_text(
             format_status(health, signals=signals, macro_latest=macro_latest),
             reply_markup=build_menu(),
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=ParseMode.HTML,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Bot status failed: %s", exc)
-        await update.effective_message.reply_text("API unavailable. Please try again later.", reply_markup=build_menu())
+        await update.effective_message.reply_text("API unavailable. Please try again later.", reply_markup=build_menu(), parse_mode=ParseMode.HTML)
+
+
+def _reply_markup_equal(left: InlineKeyboardMarkup | None, right: InlineKeyboardMarkup | None) -> bool:
+    if left is None and right is None:
+        return True
+    if left is None or right is None:
+        return False
+    return left.to_dict() == right.to_dict()
+
+
+async def _safe_edit_message(
+    query,  # noqa: ANN001
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None,
+) -> None:
+    current_text = query.message.text_html if query.message else None
+    current_markup = query.message.reply_markup if query.message else None
+    if current_text == text and _reply_markup_equal(current_markup, reply_markup):
+        return
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    except BadRequest as exc:
+        if "Message is not modified" in str(exc):
+            return
+        raise
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -129,18 +155,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     api: ApiClient = context.bot_data["api"]
     try:
         if data == MENU_MAIN:
-            await query.edit_message_text("Menu:", reply_markup=build_menu())
+            await _safe_edit_message(query, "Menu:", build_menu())
             return
         if data == MENU_PRICES:
             payload = await api.get_prices()
             prices = (payload.get("tickers") or [])[:10]
             text = format_prices(prices, errors=payload.get("errors"))
-            await query.edit_message_text(text, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
+            await _safe_edit_message(query, text, build_menu())
             return
         if data == MENU_MACRO:
             payload = await api.get_macro_latest()
             text = format_macro_summary(payload)
-            await query.edit_message_text(text, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
+            await _safe_edit_message(query, text, build_menu())
             return
         if data == MENU_NEWS:
             payload = await api.get_news(page=1, page_size=NEWS_PAGE_SIZE)
@@ -151,7 +177,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     InlineKeyboardButton("Menu", callback_data=MENU_MAIN),
                 ]
             ]
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+            await _safe_edit_message(query, text, InlineKeyboardMarkup(keyboard))
             return
         if data.startswith(NEWS_PAGE_PREFIX):
             page = int(data.replace(NEWS_PAGE_PREFIX, "") or "1")
@@ -164,7 +190,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 ],
                 [InlineKeyboardButton("Menu", callback_data=MENU_MAIN)],
             ]
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+            await _safe_edit_message(query, text, InlineKeyboardMarkup(keyboard))
             return
         if data == MENU_SIGNALS or data.startswith(SIGNALS_PAGE_PREFIX):
             payload = await api.get_signals()
@@ -187,7 +213,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if nav_buttons:
                 buttons.append(nav_buttons)
             buttons.append([InlineKeyboardButton("Back", callback_data=MENU_MAIN)])
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseMode.MARKDOWN)
+            await _safe_edit_message(query, text, InlineKeyboardMarkup(buttons))
             return
         if data.startswith(SIGNAL_PICK_PREFIX):
             ticker = data.replace(SIGNAL_PICK_PREFIX, "")
@@ -202,30 +228,29 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     [InlineKeyboardButton("Menu", callback_data=MENU_MAIN)],
                 ]
             )
-            await query.edit_message_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+            await _safe_edit_message(query, text, keyboard)
             return
         if data.startswith(SIGNAL_DETAIL_PREFIX):
             ticker = data.replace(SIGNAL_DETAIL_PREFIX, "")
             payload = await api.get_signal(ticker)
-            await query.message.reply_text(format_signal_detail(payload), parse_mode=ParseMode.MARKDOWN)
+            await query.message.reply_text(format_signal_detail(payload), parse_mode=ParseMode.HTML)
             return
         if data == MENU_STATUS:
             health = await api.get_health()
             signals = await api.get_signals()
             macro_latest = await api.get_macro_latest()
             text = format_status(health, signals=signals, macro_latest=macro_latest)
-            await query.edit_message_text(text, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
+            await _safe_edit_message(query, text, build_menu())
             return
         if data == MENU_HELP:
-            await query.edit_message_text(
-                "ℹ️ *Help*\nJust tap the buttons below — commands are optional.",
-                reply_markup=build_menu(),
-                parse_mode=ParseMode.MARKDOWN,
-            )
+            await _safe_edit_message(query, "ℹ️ Help\nJust tap the buttons below — commands are optional.", build_menu())
             return
     except Exception as exc:  # noqa: BLE001
         logger.warning("Bot callback failed: %s", exc)
-        await query.edit_message_text("API unavailable. Please try again later.", reply_markup=build_menu())
+        try:
+            await _safe_edit_message(query, "API unavailable. Please try again later.", build_menu())
+        except BadRequest:
+            return
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -239,7 +264,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     api: ApiClient = context.bot_data["api"]
     try:
         payload = await api.get_signal(text.lower())
-        await update.effective_message.reply_text(format_signal_detail(payload), parse_mode=ParseMode.MARKDOWN)
+        await update.effective_message.reply_text(format_signal_detail(payload), parse_mode=ParseMode.HTML)
     except Exception as exc:
         logger.warning("Bot text lookup failed: %s", exc)
-        await update.effective_message.reply_text("Ticker not found or API unavailable. Try again.")
+        await update.effective_message.reply_text("Ticker not found or API unavailable. Try again.", parse_mode=ParseMode.HTML)
