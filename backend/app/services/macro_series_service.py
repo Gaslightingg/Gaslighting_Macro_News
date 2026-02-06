@@ -189,7 +189,9 @@ async def get_latest_payload() -> MacroLatestResponse:
     cache = CacheStore(settings.cache_db_url)
     cached = cache.get_cache(_latest_cache_key())
     if cached:
-        return MacroLatestResponse(**cached, stale=cached.get("stale", False))
+        cached_payload = dict(cached)
+        cached_payload["stale"] = cached_payload.get("stale", False)
+        return MacroLatestResponse(**cached_payload)
 
     latest_items: list[MacroLatestItem] = []
     stale_response = False
