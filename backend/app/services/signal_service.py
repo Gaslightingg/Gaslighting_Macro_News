@@ -27,7 +27,12 @@ async def get_signals_payload(force_recompute: bool = False) -> SignalsApiRespon
     engine = _get_engine()
     cards = await engine.computeSignals({"forceRecompute": force_recompute})
     updated_at = cards[0].updated_at if cards else datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    return SignalsApiResponse(updated_at=updated_at, signals=cards, errors=[])
+    return SignalsApiResponse(
+        updated_at=updated_at,
+        signals=cards,
+        errors=[],
+        missing_inputs=engine.get_missing_inputs(),
+    )
 
 
 async def get_signal_payload(ticker: str, force_recompute: bool = False) -> SignalCard:

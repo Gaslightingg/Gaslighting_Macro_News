@@ -1,0 +1,9 @@
+{
+  "sp500": { "price": 5000, "as_of": "seed" },
+  "nas100": { "price": 17500, "as_of": "seed" },
+  "nqmini": { "price": 17500, "as_of": "seed" },
+  "eurusd": { "price": 1.08, "as_of": "seed" },
+  "gbpusd": { "price": 1.27, "as_of": "seed" },
+  "gbpjpy": { "price": 188.5, "as_of": "seed" },
+  "xauusd": { "price": 2300, "as_of": "seed" }
+}

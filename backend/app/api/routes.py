@@ -153,3 +153,4 @@ async def news_event(event_id: str) -> NewsEventItem:
 async def news_sync(months_back: int = 6, months_forward: int = 1) -> NewsSyncResponse:
     result = await sync_news(months_back=months_back, months_forward=months_forward)
     return NewsSyncResponse(ok=True, **result)
+

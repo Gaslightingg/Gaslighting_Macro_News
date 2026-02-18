@@ -17,10 +17,11 @@ from ..models.schemas import (
     SignalsDebugResponse,
     SignalsDebugTicker,
 )
-from ..services.macro_catalog import all_indicators, find_indicator
+from ..services.macro_catalog import ALL_CATEGORIES, all_indicators, find_indicator
 from ..services.macro_series_service import get_series_payload
 from ..services.price_catalog import PRICE_TICKERS
 from ..utils.cache_db import CacheStore
+from ..utils.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +41,46 @@ class EngineConfig:
     delta_by_frequency: dict[str, int] | None = None
     indicator_polarity: dict[str, int] | None = None
     factor_definitions: dict[str, list[tuple[str, float]]] | None = None
+    factor_weights: dict[str, float] | None = None
     exposures_by_ticker: dict[str, dict[str, float]] | None = None
 
 
+def _build_factor_definitions() -> dict[str, list[tuple[str, float]]]:
+    base: dict[str, list[tuple[str, float]]] = {
+        "laborFactor": [
+            ("unemployment", 0.35),
+            ("jobless_claims", 0.25),
+            ("continuing_claims", 0.2),
+            ("jolts", 0.2),
+        ],
+        "volFactor": [("vix", 0.7), ("vvix", 0.2), ("move", 0.1)],
+        "ratesFactor": [("us10y", 0.45), ("us2y", 0.25), ("fed_funds", 0.2), ("real_yield_10y", 0.1)],
+        "inflationFactor": [("cpi", 0.4), ("core_cpi", 0.35), ("pce", 0.25)],
+        "usdFactor": [("dxy", 0.8), ("us10y", 0.2)],
+    }
+    used_indicators = {indicator for defs in base.values() for indicator, _ in defs}
+    for category in ALL_CATEGORIES:
+        factor_name = category.id
+        if factor_name in base:
+            continue
+        indicators = [item for item in category.indicators if item.fred_series and item.id not in used_indicators]
+        if not indicators:
+            continue
+        weight = 1 / len(indicators)
+        base[factor_name] = [(item.id, weight) for item in indicators]
+        used_indicators.update(item.id for item in indicators)
+    return base
+
+
+def _build_factor_weights(factor_defs: dict[str, list[tuple[str, float]]]) -> dict[str, float]:
+    if not factor_defs:
+        return {}
+    weight = 1 / len(factor_defs)
+    return {name: weight for name in factor_defs}
+
+
 def _default_config() -> EngineConfig:
+    factor_defs = _build_factor_definitions()
     return EngineConfig(
         delta_by_frequency={"daily": 1, "weekly": 7, "monthly": 30, "quarterly": 90},
         indicator_polarity={
@@ -63,18 +100,8 @@ def _default_config() -> EngineConfig:
             "pce": -1,
             "dxy": 1,
         },
-        factor_definitions={
-            "laborFactor": [
-                ("unemployment", 0.35),
-                ("jobless_claims", 0.25),
-                ("continuing_claims", 0.2),
-                ("jolts", 0.2),
-            ],
-            "volFactor": [("vix", 0.7), ("vvix", 0.2), ("move", 0.1)],
-            "ratesFactor": [("us10y", 0.45), ("us2y", 0.25), ("fed_funds", 0.2), ("real_yield_10y", 0.1)],
-            "inflationFactor": [("cpi", 0.4), ("core_cpi", 0.35), ("pce", 0.25)],
-            "usdFactor": [("dxy", 0.8), ("us10y", 0.2)],
-        },
+        factor_definitions=factor_defs,
+        factor_weights=_build_factor_weights(factor_defs),
         exposures_by_ticker={
             "sp500": {"laborFactor": 0.35, "volFactor": 0.35, "ratesFactor": 0.2, "inflationFactor": 0.1},
             "nas100": {"laborFactor": 0.3, "volFactor": 0.3, "ratesFactor": 0.3, "inflationFactor": 0.1},
@@ -104,7 +131,7 @@ class MacroDataProvider:
     async def getSeries(self, indicatorId: str, opts: dict[str, str | None]) -> dict:
         payload = await get_series_payload(indicatorId, "10y")
         points = [{"t": p.date, "value": p.value} for p in payload.points]
-        return {"points": points, "lastUpdated": payload.last_updated, "source": payload.source}
+        return {"points": points, "lastUpdated": payload.last_updated, "source": payload.source, "error": payload.error}
 
     async def listAvailableIndicators(self) -> list[str]:
         return [item.id for item in all_indicators() if item.fred_series]
@@ -123,6 +150,7 @@ class SignalEngine:
         self.config = config or _default_config()
         self._last_indicator_errors: dict[str, str] = {}
         self._last_provider_errors: list[str] = []
+        self._last_missing_inputs: list[str] = []
 
     async def computeSignals(self, opts: dict | None = None) -> list[SignalCard]:
         opts = opts or {}
@@ -253,19 +281,28 @@ class SignalEngine:
         opts = opts or {}
         factors: FactorsSnapshot = opts.get("factors") or await self.getFactorsSnapshot({"forceRecompute": bool(opts.get("forceRecompute", False))})
         exposures = (self.config.exposures_by_ticker or {}).get(ticker, {})
+        factor_weights = self.config.factor_weights or {}
+        explicit_weight_sum = sum(weight for weight in exposures.values() if weight)
+        default_factors = [name for name in factors.factors.keys() if name not in exposures]
+        default_total = sum(factor_weights.get(name, 0.0) for name in default_factors)
+        remaining = max(0.0, 1.0 - explicit_weight_sum)
+        default_scale = (remaining / default_total) if default_total > 0 else 0.0
 
         contributions: list[float] = []
         ticker_score = 0.0
         coverage_values: list[float] = []
-        missing_inputs: list[str] = []
+        missing_inputs: list[str] = list(self._last_missing_inputs)
         top_contributors: list[tuple[float, str, FactorContributor, float]] = []
 
         for factor_name, factor in factors.factors.items():
-            weight = exposures.get(factor_name, 0.0)
+            if factor_name in exposures:
+                weight = exposures.get(factor_name, 0.0)
+            else:
+                weight = factor_weights.get(factor_name, 0.0) * default_scale
             if weight == 0:
                 continue
             if factor.score is None:
-                missing_inputs.append(factor_name)
+                missing_inputs.append(f"{factor_name}: no data")
                 continue
             contribution = factor.score * weight
             ticker_score += contribution
@@ -291,7 +328,7 @@ class SignalEngine:
             k=self.config.directional_k,
             flat_bias_threshold=self.config.flat_bias_threshold,
         )
-        bullets = _build_bullets(top_contributors, data_coverage)
+        bullets, top_positive, top_negative = _build_bullets(top_contributors, data_coverage)
         bullets.insert(0, f"Debug: score={ticker_score:+.3f}, p_long_raw={directional['p_long_raw']:.3f}, p_long_adj={directional['p_long_adj']:.3f}, k={self.config.directional_k:.2f}")
         return SignalCard(
             ticker=ticker,
@@ -308,6 +345,9 @@ class SignalEngine:
                 factorScores={name: f.score for name, f in factors.factors.items()},
                 missingInputs=sorted(set(missing_inputs)),
                 cacheStatus=opts.get("cacheStatus", "FRESH"),
+                factorContributions={name: factors.factors[name].contributors for name in factors.factors},
+                topPositiveDrivers=top_positive,
+                topNegativeDrivers=top_negative,
             ),
         )
 
@@ -328,6 +368,12 @@ class SignalEngine:
 
         self._last_indicator_errors = {}
         self._last_provider_errors = []
+        self._last_missing_inputs = []
+        settings = get_settings()
+        if not settings.fred_api_key:
+            self._last_missing_inputs.append("FRED_API_KEY missing")
+        if not settings.bea_api_key:
+            self._last_missing_inputs.append("BEA_API_KEY missing")
         norm_map: dict[str, dict | None] = {}
         tasks = [self._normalized_indicator(indicator_id, force_recompute) for indicator_id in needed_indicators]
         results = await asyncio.gather(*tasks)
@@ -337,6 +383,7 @@ class SignalEngine:
             norm_map[indicator_id] = normalized
             if reason:
                 self._last_indicator_errors[indicator_id] = reason
+                self._last_missing_inputs.append(f"{indicator_id}: {reason}")
 
         factors: dict[str, FactorSnapshot] = {}
         for factor_name, defs in factor_defs.items():
@@ -357,6 +404,8 @@ class SignalEngine:
                         contribution=round(contribution, 4),
                         zscore=round(normalized["zscore"], 4),
                         delta=round(normalized["delta"], 4),
+                        weight=weight,
+                        factor=factor_name,
                     )
                 )
             coverage = used_weight / total_weight if total_weight > 0 else 0.0
@@ -396,6 +445,9 @@ class SignalEngine:
             tickers_debug=tickers_debug,
         )
 
+    def get_missing_inputs(self) -> list[str]:
+        return list(self._last_missing_inputs)
+
     async def _normalized_indicator(self, indicator_id: str, force_recompute: bool) -> dict:
         cache_key = f"signals-engine:norm:{indicator_id}"
         if not force_recompute:
@@ -406,7 +458,7 @@ class SignalEngine:
         raw = await self._raw_series(indicator_id, force_recompute)
         points = raw.get("points", []) if raw else []
         if len(points) < 3:
-            return {"data": None, "reason": "not enough points"}
+            return {"data": None, "reason": raw.get("error") or "not enough points"}
 
         ordered = sorted(points, key=lambda item: item["t"])
         latest = ordered[-1]
@@ -502,9 +554,28 @@ def _directional_split(score: float, confidence: int, k: float, flat_bias_thresh
         "bias": bias,
     }
 
-def _build_bullets(top_contributors: list[tuple[float, str, FactorContributor, float]], data_coverage: float) -> list[str]:
+def _build_bullets(top_contributors: list[tuple[float, str, FactorContributor, float]], data_coverage: float) -> tuple[list[str], list[str], list[str]]:
     bullets: list[str] = []
     ranked = sorted(top_contributors, key=lambda item: item[0], reverse=True)
+    signed_ranked = sorted(
+        top_contributors,
+        key=lambda item: (item[2].contribution * item[3]),
+        reverse=True,
+    )
+    positive = [
+        f"{contributor.indicator} via {factor_name}"
+        for _, factor_name, contributor, exposure in signed_ranked
+        if contributor.contribution * exposure > 0
+    ][:2]
+    negative = [
+        f"{contributor.indicator} via {factor_name}"
+        for _, factor_name, contributor, exposure in reversed(signed_ranked)
+        if contributor.contribution * exposure < 0
+    ][:2]
+    if positive:
+        bullets.append(f"Top +: {', '.join(positive)}")
+    if negative:
+        bullets.append(f"Top -: {', '.join(negative)}")
     for _, factor_name, contributor, exposure in ranked[:5]:
         direction = "supports upside" if contributor.contribution * exposure >= 0 else "adds downside pressure"
         bullets.append(
@@ -514,4 +585,4 @@ def _build_bullets(top_contributors: list[tuple[float, str, FactorContributor, f
         bullets.append("Insufficient macro coverage; signal confidence reduced.")
     if not bullets:
         bullets.append("Macro inputs are mixed; no dominant factor.")
-    return bullets[:5]
+    return bullets[:5], positive, negative

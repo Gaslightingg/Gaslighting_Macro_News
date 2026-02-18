@@ -23,14 +23,18 @@ class PriceTicker(BaseModel):
     name: str
     asset_class: str
     unit: str | None
-    value: float | None
-    change: float | None
+    value: float | str | None
+    change: float | str | None
     change_pct: float | None
     last_updated: str | None
+    as_of: str | None = None
     source: str | None
     status: str
     quality: str
     error: str | None = None
+    error_reason: str | None = None
+    tried_sources: List[str] = Field(default_factory=list)
+    stale: bool | None = None
     history_points: List[PriceHistoryPoint]
     history_meta: PriceHistoryMeta | None
 
@@ -38,6 +42,8 @@ class PriceTicker(BaseModel):
 class PricesResponse(BaseModel):
     as_of: str
     tickers: List[PriceTicker]
+    errors: dict[str, str] = Field(default_factory=dict)
+    timed_out: bool = False
 
 
 class PriceHistoryResponse(BaseModel):
@@ -91,10 +97,11 @@ class MacroCategoriesResponse(BaseModel):
 class MacroLatestItem(BaseModel):
     indicator_id: str
     name: str
-    value: float | None
-    change: float | None
+    value: float | str
+    change: float | str
     unit: str | None
-    last_updated: str | None
+    last_updated: str
+    updated_at: str | None = None
     category: str
     status: str
     source: str | None
@@ -103,11 +110,16 @@ class MacroLatestItem(BaseModel):
     stale_after_seconds: int
     quality: str
     error: str | None = None
+    reason: str | None = None
+    stale: bool | None = None
 
 
 class MacroLatestResponse(BaseModel):
     as_of: str
     latest: List[MacroLatestItem]
+    stale: bool | None = None
+    missing_inputs: List[str] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
 
 
 class MacroSeriesPoint(BaseModel):
@@ -136,6 +148,8 @@ class FactorContributor(BaseModel):
     contribution: float
     zscore: float
     delta: float
+    weight: float | None = None
+    factor: str | None = None
 
 
 class FactorSnapshot(BaseModel):
@@ -156,6 +170,9 @@ class SignalDebug(BaseModel):
     missingInputs: List[str]
     cacheStatus: str
     migrated: bool | None = None
+    factorContributions: dict[str, List[FactorContributor]] | None = None
+    topPositiveDrivers: List[str] | None = None
+    topNegativeDrivers: List[str] | None = None
 
 
 class SignalCard(BaseModel):
@@ -194,6 +211,7 @@ class SignalsApiResponse(BaseModel):
     updated_at: str
     signals: List[SignalCard]
     errors: List[str]
+    missing_inputs: List[str] = Field(default_factory=list)
 
 
 class SignalsDebugTicker(BaseModel):
