@@ -210,6 +210,7 @@ async def _persist_latest_with_retry(store: PriceHistoryStore, ticker_id: str, l
 
 async def _persist_live_tickers_background(store: PriceHistoryStore, tickers: list[dict], request_id: str) -> None:
     persistence_errors = 0
+    logger.info("persistence_batch_started rid=%s batch_size=%s", request_id, len(tickers))
     async with _persistence_write_lock:
         for ticker in tickers:
             ticker_id = str(ticker.get("id"))
@@ -225,8 +226,12 @@ async def _persist_live_tickers_background(store: PriceHistoryStore, tickers: li
             except Exception as exc:  # noqa: BLE001
                 persistence_errors += 1
                 logger.warning("Price persistence failed for %s rid=%s: %s", ticker_id, request_id, exc)
+            else:
+                logger.info("Price persistence succeeded for %s rid=%s", ticker_id, request_id)
     if persistence_errors:
         logger.warning("persistence_batch_completed rid=%s persistence_errors=%s", request_id, persistence_errors)
+    else:
+        logger.info("persistence_batch_completed rid=%s persistence_errors=0", request_id)
 
 
 def _schedule_persistence(store: PriceHistoryStore, tickers: list[dict], request_id: str) -> None:
@@ -673,6 +678,14 @@ async def _ensure_history(
     return points
 
 
+async def _get_refresh_history_points(store: PriceHistoryStore, ticker_id: str) -> list[HistoryPoint]:
+    try:
+        return await store.get_history(ticker_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("History read failed during refresh for %s: %s", ticker_id, exc)
+        return []
+
+
 async def _ensure_latest(
     store: PriceHistoryStore,
     client: httpx.AsyncClient,
@@ -702,7 +715,10 @@ async def _ensure_latest(
         }
     tried_sources: list[str] = []
     error_reason: str | None = None
+    first_attempt_started_at: str | None = None
     for attempt in plan.latest_chain:
+        if first_attempt_started_at is None:
+            first_attempt_started_at = datetime.utcnow().isoformat()
         started = perf_counter()
         tried_sources.append(f"{attempt.provider}:{attempt.symbol}")
         latest: tuple[float, float, str] | None = None
@@ -731,6 +747,7 @@ async def _ensure_latest(
                 "quality": "high",
                 "tried_sources": tried_sources,
                 "_persist": True,
+                "first_attempt_started_at": first_attempt_started_at,
             }
             _log_attempt(
                 "ticker=%s Result=SUCCESS provider=%s symbol=%s latency_ms=%.1f",
@@ -761,6 +778,7 @@ async def _ensure_latest(
         cached["tried_sources"] = tried_sources
         cached["error_reason"] = error_reason
         cached["provider_loop_started"] = bool(tried_sources)
+        cached["first_attempt_started_at"] = first_attempt_started_at
         if not tried_sources:
             cached["no_attempts_reason"] = "fallback_db_triggered_before_live_attempts"
         return cached
@@ -769,6 +787,7 @@ async def _ensure_latest(
         "error_reason": error_reason,
         "tried_sources": tried_sources,
         "provider_loop_started": bool(tried_sources),
+        "first_attempt_started_at": first_attempt_started_at,
         "no_attempts_reason": "no_attempts_executed" if not tried_sources else None,
     }
 
@@ -963,9 +982,15 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
         semaphore = asyncio.Semaphore(settings.price_fetch_concurrency)
         ticker_by_id: dict[str, dict] = {}
 
-        async def run_for_ticker(config: PriceConfig) -> tuple[str, dict]:
+        async def run_for_ticker(config: PriceConfig, order: int) -> tuple[str, dict]:
             started = perf_counter()
             deadline_remaining_ms = max(0.0, (refresh_deadline - started) * 1000)
+            _log_attempt(
+                "ticker=%s scheduler_start_order=%s deadline_remaining_ms=%.1f",
+                config.id,
+                order,
+                deadline_remaining_ms,
+            )
             try:
                 if deadline_remaining_ms <= 1:
                     ticker = await _build_cached_payload(
@@ -976,18 +1001,16 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
                     )
                     ticker["provider_loop_started"] = False
                     ticker["no_attempts_reason"] = "global_deadline_exceeded_before_attempts"
+                    ticker["cancellation_reason"] = "global_deadline_exceeded_before_attempts"
                     ticker["deadline_remaining_ms"] = 0.0
                     return config.id, ticker
-                ticker = await asyncio.wait_for(
-                    _build_ticker_payload(
-                        config,
-                        store,
-                        client,
-                        semaphore,
-                        timeout_seconds=effective_timeout,
-                        allow_seed=settings.allow_seed_prices,
-                    ),
-                    timeout=effective_timeout,
+                ticker = await _build_ticker_payload(
+                    config,
+                    store,
+                    client,
+                    semaphore,
+                    timeout_seconds=effective_timeout,
+                    allow_seed=settings.allow_seed_prices,
                 )
             except asyncio.TimeoutError:
                 nonlocal timed_out
@@ -1000,6 +1023,7 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
                 )
                 ticker["provider_loop_started"] = False
                 ticker["no_attempts_reason"] = "cancelled_before_provider_loop"
+                ticker["cancellation_reason"] = "ticker_timeout_before_first_attempt"
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Ticker fetch failed for %s: %s", config.id, exc)
                 ticker = await _build_cached_payload(
@@ -1010,6 +1034,7 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
                 )
                 ticker["provider_loop_started"] = False
                 ticker["no_attempts_reason"] = "provider_tasks_not_awaited"
+                ticker["cancellation_reason"] = "provider_task_exception"
             latency_ms = (perf_counter() - started) * 1000
             ticker["fetch_latency_ms"] = round(latency_ms, 2)
             ticker["age_seconds"] = _age_seconds(ticker.get("last_updated"))
@@ -1047,15 +1072,17 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
                 no_attempts_reason=ticker.get("no_attempts_reason"),
             )
             _log_attempt(
-                "ticker=%s provider_loop_started=%s deadline_remaining_ms=%.1f no_attempts_reason=%s",
+                "ticker=%s provider_loop_started=%s first_attempt_started_at=%s deadline_remaining_ms=%.1f no_attempts_reason=%s cancellation_reason=%s",
                 config.id,
                 ticker.get("provider_loop_started"),
+                ticker.get("first_attempt_started_at") or "none",
                 ticker.get("deadline_remaining_ms") or 0.0,
                 ticker.get("no_attempts_reason"),
+                ticker.get("cancellation_reason") or "none",
             )
             return config.id, ticker
 
-        results = await asyncio.gather(*(run_for_ticker(config) for config in configs), return_exceptions=True)
+        results = await asyncio.gather(*(run_for_ticker(config, idx) for idx, config in enumerate(configs)), return_exceptions=True)
         for idx, result in enumerate(results):
             config = configs[idx]
             if isinstance(result, Exception):
@@ -1146,7 +1173,7 @@ async def _build_ticker_payload_inner(
 ) -> dict:
     try:
         latest = await _ensure_latest(store, client, config, timeout_seconds)
-        history = await _ensure_history(store, client, config, timeout_seconds)
+        history = await _get_refresh_history_points(store, config.id)
         meta = _history_meta(history)
 
         spark_points = history[-SPARKLINE_POINTS:] if history else []
@@ -1268,6 +1295,7 @@ async def _build_ticker_payload_inner(
         )
         normalized["provider_loop_started"] = (latest or {}).get("provider_loop_started", bool(tried_sources))
         normalized["no_attempts_reason"] = (latest or {}).get("no_attempts_reason")
+        normalized["first_attempt_started_at"] = (latest or {}).get("first_attempt_started_at")
         return normalized
     except Exception as exc:
         logger.exception("Failed to build ticker payload for %s", config.id)

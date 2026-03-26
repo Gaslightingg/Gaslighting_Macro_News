@@ -814,3 +814,102 @@ async def test_follower_gets_fresh_while_persistence_retries(monkeypatch):
     )
     assert first.timed_out is False
     assert second.timed_out is False
+
+
+@pytest.mark.asyncio
+async def test_late_tickers_still_get_first_attempt_when_deadline_positive(monkeypatch):
+    configs = (
+        PriceConfig("a", "A", "A", "index", "pts", "", (), "A"),
+        PriceConfig("b", "B", "B", "index", "pts", "", (), "B"),
+        PriceConfig("c", "C", "C", "index", "pts", "", (), "C"),
+    )
+    monkeypatch.setattr(price_service, "PRICE_TICKERS", configs)
+    monkeypatch.setattr(price_service, "get_settings", lambda: type("S", (), {
+        "cache_ttl_prices": 0,
+        "price_fetch_timeout_seconds": 0.2,
+        "price_fetch_concurrency": 1,
+        "allow_seed_prices": False,
+        "debug_price_fetch": False,
+    })())
+
+    async def fake_build(config, *_args, **_kwargs):
+        await asyncio.sleep(0.05)
+        return {
+            "id": config.id,
+            "symbol": config.symbol,
+            "name": config.name,
+            "asset_class": config.asset_class,
+            "unit": config.unit,
+            "value": 1.0,
+            "change": 0.1,
+            "change_pct": 0.1,
+            "last_updated": "2026-01-01",
+            "as_of": "2026-01-01T00:00:00Z",
+            "source": "stooq",
+            "provider": "stooq",
+            "status": "live",
+            "quality": "high",
+            "provider_loop_started": True,
+            "first_attempt_started_at": datetime.utcnow().isoformat(),
+            "history_points": [],
+            "history_meta": {"data_start": None, "data_end": None, "interval": "1d", "points_count": 0},
+            "tried_sources": [f"stooq:{config.id}"],
+            "stale": False,
+        }
+
+    async def fake_store():
+        return _FakeStore()
+
+    monkeypatch.setattr(price_service, "_build_ticker_payload", fake_build)
+    monkeypatch.setattr(price_service, "_get_store", fake_store)
+    payload = await price_service.get_prices_payload(bypass_cache=True, request_id="late-attempts")
+    assert all(t.provider_loop_started for t in payload.tickers)
+    assert all(t.no_attempts_reason in {None, ""} for t in payload.tickers)
+
+
+@pytest.mark.asyncio
+async def test_secondary_history_work_does_not_block_spot_refresh(monkeypatch):
+    cfg = PriceConfig("sp500", "S&P500", "S&P 500", "index", "pts", "", (), "^GSPC")
+    monkeypatch.setattr(price_service, "PRICE_TICKERS", (cfg,))
+
+    async def fake_build(*_args, **_kwargs):
+        await asyncio.sleep(0.02)
+        return {
+            "id": "sp500",
+            "symbol": "S&P500",
+            "name": "S&P 500",
+            "asset_class": "index",
+            "unit": "pts",
+            "value": 5000.0,
+            "change": 0.5,
+            "change_pct": 0.5,
+            "last_updated": "2026-01-01",
+            "as_of": "2026-01-01T00:00:00Z",
+            "source": "stooq",
+            "provider": "stooq",
+            "status": "live",
+            "quality": "high",
+            "history_points": [],
+            "history_meta": {"data_start": None, "data_end": None, "interval": "1d", "points_count": 0},
+            "tried_sources": ["stooq:spy.us"],
+            "stale": False,
+        }
+
+    async def fake_store():
+        return _FakeStore()
+
+    async def slow_history(*_args, **_kwargs):
+        await asyncio.sleep(0.5)
+        return []
+
+    monkeypatch.setattr(price_service, "_build_ticker_payload", fake_build)
+    monkeypatch.setattr(price_service, "_get_store", fake_store)
+    monkeypatch.setattr(price_service, "_ensure_history", slow_history)
+
+    history_task = asyncio.create_task(price_service.get_price_history_payload("sp500", "1m"))
+    started = perf_counter()
+    payload = await price_service.get_prices_payload(bypass_cache=True, request_id="spot-priority")
+    elapsed = perf_counter() - started
+    assert payload.summary["ok_live"] == 1
+    assert elapsed < 0.2
+    history_task.cancel()
