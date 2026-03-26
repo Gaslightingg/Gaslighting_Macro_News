@@ -167,14 +167,20 @@ async def _fetch_series(
 def log_macro_startup_validation() -> None:
     for indicator in all_indicators():
         if indicator.source.upper() == "FRED" and indicator.fred_series:
-            logger.info("Macro series mapping: indicator=%s provider=fred series=%s", indicator.id, indicator.fred_series)
-        elif indicator.source.lower() == "unsupported" or not indicator.fred_series:
-            logger.warning(
-                "Macro series unsupported: indicator=%s provider=%s series=%s",
-                indicator.id,
-                indicator.source,
-                indicator.fred_series or "none",
-            )
+            support_status = "supported"
+        elif indicator.source.lower() == "derived":
+            support_status = "derived"
+        elif indicator.source.lower() == "placeholder":
+            support_status = "placeholder"
+        else:
+            support_status = "unsupported"
+        logger.info(
+            "Macro mapping report: indicator=%s provider=%s series=%s support_status=%s",
+            indicator.id,
+            indicator.source,
+            indicator.fred_series or "none",
+            support_status,
+        )
 
 
 async def get_series_payload(indicator_id: str, range_key: str) -> MacroSeriesResponse:
@@ -296,8 +302,13 @@ async def get_latest_payload() -> MacroLatestResponse:
         return None
 
     def no_data_reason(indicator: MacroIndicator) -> str | None:
-        if indicator.fred_series is None and indicator.source.lower() == "derived":
-            return "No data source configured"
+        source = indicator.source.lower()
+        if source == "unsupported":
+            return "no_provider_mapping"
+        if source == "placeholder":
+            return "placeholder_indicator"
+        if indicator.fred_series is None and source == "derived":
+            return "derived_indicator"
         return None
 
     async def build_latest(indicator: MacroIndicator) -> None:
@@ -346,6 +357,8 @@ async def get_latest_payload() -> MacroLatestResponse:
             return
         no_data = no_data_reason(indicator)
         if no_data and cached_latest is None:
+            source_kind = indicator.source.lower()
+            status = "unsupported" if source_kind == "unsupported" else "placeholder" if source_kind == "placeholder" else "derived" if source_kind == "derived" else "empty"
             latest_items.append(
                 MacroLatestItem(
                     indicator_id=indicator.id,
@@ -356,7 +369,7 @@ async def get_latest_payload() -> MacroLatestResponse:
                     last_updated="N/A",
                     updated_at="N/A",
                     category=indicator.category,
-                    status="empty",
+                    status=status,
                     source=indicator.source,
                     history_points=0,
                     expected_frequency=indicator.frequency,

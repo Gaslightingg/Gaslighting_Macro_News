@@ -407,9 +407,12 @@ def _log_ticker_result(
     error_reason: str | None,
     fallback_chain: list[str] | None = None,
     planned_chain: list[str] | None = None,
+    provider_loop_started: bool | None = None,
+    deadline_remaining_ms: float | None = None,
+    no_attempts_reason: str | None = None,
 ) -> None:
     logger.info(
-        "price_fetch rid=%s ticker=%s symbol=%s provider=%s status=%s source=%s latency_ms=%.1f error_reason=%s planned_chain=%s attempted_chain=%s",
+        "price_fetch rid=%s ticker=%s symbol=%s provider=%s status=%s source=%s latency_ms=%.1f error_reason=%s planned_chain=%s attempted_chain=%s provider_loop_started=%s deadline_remaining_ms=%.1f no_attempts_reason=%s",
         _price_request_id.get(),
         config.id,
         config.symbol,
@@ -420,6 +423,9 @@ def _log_ticker_result(
         error_reason or "none",
         ",".join(planned_chain or []),
         ",".join(fallback_chain or []),
+        provider_loop_started,
+        deadline_remaining_ms or 0.0,
+        no_attempts_reason or "none",
     )
 
 
@@ -553,14 +559,14 @@ async def _ensure_latest(
         cached["error_reason"] = error_reason
         cached["provider_loop_started"] = bool(tried_sources)
         if not tried_sources:
-            cached["no_attempts_reason"] = "NO_ATTEMPTS_EXECUTED"
+            cached["no_attempts_reason"] = "fallback_db_triggered_before_live_attempts"
         return cached
     return {
         "status": "error",
         "error_reason": error_reason,
         "tried_sources": tried_sources,
         "provider_loop_started": bool(tried_sources),
-        "no_attempts_reason": "NO_ATTEMPTS_EXECUTED" if not tried_sources else None,
+        "no_attempts_reason": "no_attempts_executed" if not tried_sources else None,
     }
 
 
@@ -647,7 +653,7 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
                         allow_seed=settings.allow_seed_prices,
                     )
                     ticker["provider_loop_started"] = False
-                    ticker["no_attempts_reason"] = "GLOBAL_DEADLINE_EXHAUSTED"
+                    ticker["no_attempts_reason"] = "global_deadline_exceeded_before_attempts"
                     ticker["deadline_remaining_ms"] = 0.0
                     return config.id, ticker
                 ticker = await asyncio.wait_for(
@@ -671,7 +677,7 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
                     allow_seed=settings.allow_seed_prices,
                 )
                 ticker["provider_loop_started"] = False
-                ticker["no_attempts_reason"] = "TICKER_TIMEOUT"
+                ticker["no_attempts_reason"] = "cancelled_before_provider_loop"
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Ticker fetch failed for %s: %s", config.id, exc)
                 ticker = await _build_cached_payload(
@@ -681,7 +687,7 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
                     allow_seed=settings.allow_seed_prices,
                 )
                 ticker["provider_loop_started"] = False
-                ticker["no_attempts_reason"] = "TICKER_EXCEPTION"
+                ticker["no_attempts_reason"] = "provider_tasks_not_awaited"
             latency_ms = (perf_counter() - started) * 1000
             ticker["fetch_latency_ms"] = round(latency_ms, 2)
             ticker["age_seconds"] = _age_seconds(ticker.get("last_updated"))
@@ -690,7 +696,7 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
             if "provider_loop_started" not in ticker:
                 ticker["provider_loop_started"] = bool(ticker.get("tried_sources"))
             if not ticker.get("tried_sources") and not ticker.get("no_attempts_reason"):
-                ticker["no_attempts_reason"] = "NO_ATTEMPTS_EXECUTED"
+                ticker["no_attempts_reason"] = "no_attempts_executed"
             plan = get_provider_plan(config.id)
             planned_chain = [
                 f"{item.provider}:{item.symbol}"
@@ -705,6 +711,9 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
                 error_reason=ticker.get("error_reason") or ticker.get("error"),
                 fallback_chain=list(ticker.get("tried_sources") or []),
                 planned_chain=planned_chain,
+                provider_loop_started=ticker.get("provider_loop_started"),
+                deadline_remaining_ms=ticker.get("deadline_remaining_ms"),
+                no_attempts_reason=ticker.get("no_attempts_reason"),
             )
             _log_attempt(
                 "ticker=%s provider_loop_started=%s deadline_remaining_ms=%.1f no_attempts_reason=%s",
@@ -985,7 +994,7 @@ async def _build_cached_payload(
                 tried_sources=[],
             )
             payload["provider_loop_started"] = False
-            payload["no_attempts_reason"] = "SEED_FALLBACK"
+            payload["no_attempts_reason"] = "early_return_to_stale_snapshot"
             return payload
         payload = normalize_price_ticker(
             {
@@ -1008,7 +1017,7 @@ async def _build_cached_payload(
             tried_sources=[],
         )
         payload["provider_loop_started"] = False
-        payload["no_attempts_reason"] = "NO_ATTEMPTS_EXECUTED"
+        payload["no_attempts_reason"] = "no_attempts_executed"
         return payload
     payload = normalize_price_ticker(
         {
@@ -1033,7 +1042,7 @@ async def _build_cached_payload(
         tried_sources=[],
     )
     payload["provider_loop_started"] = False
-    payload["no_attempts_reason"] = "FALLBACK_DB"
+    payload["no_attempts_reason"] = "fallback_db_triggered_before_live_attempts"
     return payload
 
 
