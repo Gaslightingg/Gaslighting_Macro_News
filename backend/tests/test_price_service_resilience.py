@@ -633,14 +633,18 @@ async def test_successful_live_fx_fetch(monkeypatch):
     cfg = PriceConfig("eurusd", "EUR/USD", "EUR/USD", "fx", "USD", "", (), "EURUSD=X")
     store = _FakeStore()
 
-    async def stooq_ok(*_args, **_kwargs):
-        return 1.095, 0.12, "2026-01-01"
+    async def frankfurter_ok(*_args, **_kwargs):
+        return (1.095, 0.12, "2026-01-01"), None
 
-    monkeypatch.setattr(price_service, "_fetch_stooq_latest", stooq_ok)
+    async def stooq_fail(*_args, **_kwargs):
+        return None, "stooq_request_failed"
+
+    monkeypatch.setattr(price_service, "_fetch_frankfurter_latest", frankfurter_ok)
+    monkeypatch.setattr(price_service, "_fetch_stooq_latest", stooq_fail)
     latest = await price_service._ensure_latest(store, client=None, config=cfg, timeout_seconds=0.1)  # type: ignore[arg-type]
     assert latest is not None
     assert latest["status"] == "live"
-    assert latest["source"] == "stooq"
+    assert latest["source"] == "frankfurter"
     assert isinstance(latest["value"], float)
 
 

@@ -103,8 +103,7 @@ def _set_provider_cooldown(provider: str, seconds: int) -> None:
 
 
 def _log_attempt(message: str, *args) -> None:
-    if _price_debug_enabled.get():
-        logger.info("[PRICE_FETCH][rid=%s] " + message, _price_request_id.get(), *args)
+    logger.info("[PRICE_FETCH][rid=%s] " + message, _price_request_id.get(), *args)
 
 
 def _sanitize_ticker_numeric_fields(ticker: dict) -> dict:
@@ -487,6 +486,53 @@ async def _fetch_yfinance_history(
     return [HistoryPoint(date=date, value=value, change_pct=None) for date, value in points]
 
 
+async def _fetch_frankfurter_latest(
+    client: httpx.AsyncClient,
+    pair_symbol: str,
+) -> tuple[tuple[float, float, str] | None, str | None]:
+    try:
+        base, quote = [chunk.strip().upper() for chunk in pair_symbol.split("/", 1)]
+    except ValueError:
+        return None, "invalid_fx_symbol"
+
+    latest_url = "https://api.frankfurter.app/latest"
+    latest_resp = await _request_with_retries(client, latest_url, {"from": base, "to": quote}, retries=1)
+    if latest_resp is None:
+        return None, "frankfurter_request_failed"
+    try:
+        latest_payload = latest_resp.json()
+        latest_date = str(latest_payload.get("date") or "")
+        latest_rate = float((latest_payload.get("rates") or {}).get(quote))
+    except Exception:
+        return None, "frankfurter_parse_error"
+    if not latest_date:
+        return None, "frankfurter_no_data"
+
+    latest_dt = datetime.strptime(latest_date, "%Y-%m-%d")
+    prev_rate: float | None = None
+    for shift in range(1, 5):
+        prev_dt = latest_dt - timedelta(days=shift)
+        prev_resp = await _request_with_retries(
+            client,
+            f"https://api.frankfurter.app/{prev_dt.strftime('%Y-%m-%d')}",
+            {"from": base, "to": quote},
+            retries=0,
+        )
+        if prev_resp is None:
+            continue
+        try:
+            prev_payload = prev_resp.json()
+            prev_rate = float((prev_payload.get("rates") or {}).get(quote))
+        except Exception:
+            continue
+        if prev_rate:
+            break
+    if prev_rate in {None, 0.0}:
+        return (latest_rate, 0.0, latest_date), None
+    change_pct = ((latest_rate - prev_rate) / prev_rate) * 100
+    return (latest_rate, round(change_pct, 4), latest_date), None
+
+
 def _resolve_symbols(config: PriceConfig) -> dict[str, str | None]:
     mapping = get_symbol_mapping(config.id)
     return {
@@ -630,9 +676,11 @@ async def _ensure_latest(
         tried_sources.append(f"{attempt.provider}:{attempt.symbol}")
         latest: tuple[float, float, str] | None = None
         current_error: str | None = None
-        _log_attempt("ticker=%s attempt provider=%s symbol=%s", config.id, attempt.provider, attempt.symbol)
+        _log_attempt("ticker=%s Attempting provider=%s symbol=%s", config.id, attempt.provider, attempt.symbol)
         if attempt.provider == "stooq":
             latest, current_error = await _fetch_stooq_latest(client, attempt.symbol)
+        elif attempt.provider == "frankfurter":
+            latest, current_error = await _fetch_frankfurter_latest(client, attempt.symbol)
         elif attempt.provider == "yfinance":
             latest, current_error = await _fetch_yfinance_latest(client, attempt.symbol, timeout_seconds=timeout_seconds)
             if latest is None and current_error is None:
@@ -654,7 +702,7 @@ async def _ensure_latest(
                 "_persist": True,
             }
             _log_attempt(
-                "ticker=%s result=SUCCESS provider=%s symbol=%s latency_ms=%.1f",
+                "ticker=%s Result=SUCCESS provider=%s symbol=%s latency_ms=%.1f",
                 config.id,
                 attempt.provider,
                 attempt.symbol,
@@ -662,7 +710,7 @@ async def _ensure_latest(
             )
             return payload
         _log_attempt(
-            "ticker=%s result=ERROR provider=%s symbol=%s latency_ms=%.1f reason=%s",
+            "ticker=%s Result=ERROR provider=%s symbol=%s latency_ms=%.1f error_type=%s",
             config.id,
             attempt.provider,
             attempt.symbol,

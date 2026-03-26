@@ -56,6 +56,7 @@ PROVIDER_MAP: dict[str, InstrumentProviderPlan] = {
     ),
     "eurusd": InstrumentProviderPlan(
         latest_chain=(
+            ProviderAttempt("frankfurter", "EUR/USD"),
             ProviderAttempt("stooq", "eurusd"),
             ProviderAttempt("stooq", "eurusd.f"),
             ProviderAttempt("yfinance", "EURUSD=X"),
@@ -68,6 +69,7 @@ PROVIDER_MAP: dict[str, InstrumentProviderPlan] = {
     ),
     "gbpusd": InstrumentProviderPlan(
         latest_chain=(
+            ProviderAttempt("frankfurter", "GBP/USD"),
             ProviderAttempt("stooq", "gbpusd"),
             ProviderAttempt("stooq", "gbpusd.f"),
             ProviderAttempt("yfinance", "GBPUSD=X"),
@@ -80,6 +82,7 @@ PROVIDER_MAP: dict[str, InstrumentProviderPlan] = {
     ),
     "gbpjpy": InstrumentProviderPlan(
         latest_chain=(
+            ProviderAttempt("frankfurter", "GBP/JPY"),
             ProviderAttempt("stooq", "gbpjpy"),
             ProviderAttempt("stooq", "gbpjpy.f"),
             ProviderAttempt("yfinance", "GBPJPY=X"),
