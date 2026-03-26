@@ -49,6 +49,9 @@ _provider_cooldowns: dict[str, datetime] = {}
 _inflight_task_created_at: datetime | None = None
 _inflight_task_result_published_at: datetime | None = None
 _snapshot_written_at: datetime | None = None
+_inflight_task_done_at: datetime | None = None
+_inflight_owner_rid: str | None = None
+_cache_snapshot_version: int = 0
 _price_request_id: ContextVar[str] = ContextVar("price_request_id", default="-")
 _price_debug_enabled: ContextVar[bool] = ContextVar("price_debug_enabled", default=False)
 SHARED_WAITER_TIMEOUT_SECONDS = 2.2
@@ -596,23 +599,38 @@ async def get_prices_payload(*, bypass_cache: bool = False, request_id: str | No
         created = False
         if _prices_refresh_task is None or _prices_refresh_task.done():
             _prices_refresh_task = asyncio.create_task(_refresh_prices_payload(bypass_cache=bypass_cache))
-            global _inflight_task_created_at
+            global _inflight_task_created_at, _inflight_owner_rid
             _inflight_task_created_at = datetime.utcnow()
+            _inflight_owner_rid = _price_request_id.get()
             logger.info("inflight_task_created rid=%s created_at=%s", _price_request_id.get(), _inflight_task_created_at.isoformat())
             created = True
         refresh_task = _prices_refresh_task
         if not created:
             logger.info(
-                "inflight_task_reused rid=%s waiter_rid=%s done=%s cancelled=%s",
+                "inflight_task_reused inflight_owner_rid=%s inflight_waiter_rid=%s done=%s cancelled=%s",
+                _inflight_owner_rid or "none",
                 _price_request_id.get(),
-                request_id or "none",
                 refresh_task.done(),
                 refresh_task.cancelled(),
             )
 
     waiter_started = perf_counter()
+    waiter_deadline = waiter_started + SHARED_WAITER_TIMEOUT_SECONDS
+    waiter_seen_snapshot_version = _cache_snapshot_version
+    logger.info(
+        "waiter_started rid=%s inflight_owner_rid=%s waiter_deadline_at=%.6f wait_started_on_task_done=%s cache_snapshot_version=%s",
+        _price_request_id.get(),
+        _inflight_owner_rid or "none",
+        waiter_deadline,
+        refresh_task.done(),
+        waiter_seen_snapshot_version,
+    )
     try:
-        payload = await asyncio.wait_for(asyncio.shield(refresh_task), timeout=SHARED_WAITER_TIMEOUT_SECONDS)
+        if refresh_task.done() and not refresh_task.cancelled():
+            payload = refresh_task.result()
+        else:
+            remaining = max(0.0, waiter_deadline - perf_counter())
+            payload = await asyncio.wait_for(asyncio.shield(refresh_task), timeout=remaining)
         if payload is None:
             logger.error("Prices refresh returned None; using controlled snapshot")
             payload = await _build_prices_snapshot(error_reason="refresh_none")
@@ -627,26 +645,33 @@ async def get_prices_payload(*, bypass_cache: bool = False, request_id: str | No
             else:
                 if payload is not None:
                     logger.info(
-                        "follower_received_fresh_snapshot=true rid=%s waiter_timeout_ms=%.1f",
+                        "follower_received_fresh_snapshot=true rid=%s inflight_owner_rid=%s waiter_timeout_ms=%.1f task_done_at=%s task_result_read_at=%s",
                         _price_request_id.get(),
+                        _inflight_owner_rid or "none",
                         waiter_elapsed_ms,
+                        _inflight_task_done_at.isoformat() if _inflight_task_done_at else "none",
+                        datetime.utcnow().isoformat(),
                     )
                     return payload
         async with _prices_cache_lock:
             cached_payload = _prices_cache.get("payload")
             cached_at = _prices_cache.get("fetched_at")
-            if cached_payload and isinstance(cached_at, datetime):
+            snapshot_is_fresh = _cache_snapshot_version > waiter_seen_snapshot_version
+            if cached_payload and isinstance(cached_at, datetime) and snapshot_is_fresh:
                 logger.info(
-                    "follower_received_fresh_snapshot=true rid=%s snapshot_written_at=%s waiter_timeout_ms=%.1f",
+                    "follower_received_fresh_snapshot=true rid=%s snapshot_written_at=%s waiter_timeout_ms=%.1f snapshot_is_fresh=%s cache_snapshot_version=%s",
                     _price_request_id.get(),
                     cached_at.isoformat(),
                     waiter_elapsed_ms,
+                    snapshot_is_fresh,
+                    _cache_snapshot_version,
                 )
                 return cached_payload
         snapshot = await _build_prices_snapshot(error_reason="refresh_timeout")
         if snapshot is not None:
             logger.warning(
-                "Shared prices refresh timed out; serving stale snapshot rid=%s waiter_timeout_ms=%.1f stale_served_reason=refresh_timeout",
+                "Shared prices refresh timed out; serving stale snapshot inflight_owner_rid=%s inflight_waiter_rid=%s waiter_timeout_ms=%.1f stale_served_reason=refresh_timeout stale_snapshot_used=true",
+                _inflight_owner_rid or "none",
                 _price_request_id.get(),
                 waiter_elapsed_ms,
             )
@@ -852,13 +877,16 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
         if not bypass_cache:
             _prices_cache["payload"] = response
             _prices_cache["fetched_at"] = now
-            global _snapshot_written_at, _inflight_task_result_published_at
-            _snapshot_written_at = now
+            global _snapshot_written_at, _inflight_task_result_published_at, _inflight_task_done_at, _cache_snapshot_version
+            _snapshot_written_at = datetime.utcnow()
             _inflight_task_result_published_at = datetime.utcnow()
+            _inflight_task_done_at = datetime.utcnow()
+            _cache_snapshot_version += 1
             logger.info(
-                "inflight_task_result_published_at=%s snapshot_written_at=%s",
+                "inflight_task_result_published_at=%s snapshot_written_at=%s cache_snapshot_version=%s",
                 _inflight_task_result_published_at.isoformat(),
                 _snapshot_written_at.isoformat(),
+                _cache_snapshot_version,
             )
     return response
 
