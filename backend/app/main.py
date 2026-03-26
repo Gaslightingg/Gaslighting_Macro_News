@@ -14,7 +14,7 @@ from .api.routes import router as api_router
 from .utils.cache_db import CacheStore
 from .utils.logging import configure_logging
 from .utils.settings import get_settings
-from .services.macro_series_service import get_latest_payload
+from .services.macro_series_service import get_latest_payload, log_macro_startup_validation
 from .services.price_service import get_prices_payload
 from .services.signal_service import get_signals_payload
 
@@ -100,6 +100,7 @@ async def _refresh_loop() -> None:
 
 @app.on_event("startup")
 async def start_scheduler() -> None:
+    log_macro_startup_validation()
     if not app.state.__dict__.get("refresh_task"):
         app.state.refresh_task = asyncio.create_task(_refresh_loop())
     if not app.state.__dict__.get("bot_app"):

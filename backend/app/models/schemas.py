@@ -35,6 +35,9 @@ class PriceTicker(BaseModel):
     age_seconds: int | None = None
     freshness_seconds: int | None = None
     fetch_latency_ms: float | None = None
+    provider_loop_started: bool | None = None
+    deadline_remaining_ms: float | None = None
+    no_attempts_reason: str | None = None
     error: str | None = None
     error_reason: str | None = None
     tried_sources: List[str] = Field(default_factory=list)

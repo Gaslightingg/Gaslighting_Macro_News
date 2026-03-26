@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
+import logging
 
 from ..models.schemas import (
     MacroCategoriesResponse,
@@ -16,6 +17,8 @@ from ..providers.fred_provider import FredClient, parse_fred_points
 from ..utils.cache_db import CacheStore, IndicatorLatest
 from ..utils.settings import get_settings
 from .macro_catalog import ALL_CATEGORIES, MacroIndicator, all_indicators, find_indicator
+
+logger = logging.getLogger(__name__)
 
 SERIES_RANGE_LIMITS = {
     "1y": 380,
@@ -109,6 +112,12 @@ async def _fetch_series(
     observation_start = _observation_start_for_range(range_key)
     settings = get_settings()
     if not indicator.fred_series:
+        logger.info(
+            "Attempt macro fetch: provider=%s series=%s indicator=%s -> UNSUPPORTED",
+            indicator.source.lower(),
+            "none",
+            indicator.id,
+        )
         return [], "No data source configured"
 
     fred_series_id = indicator.fred_series
@@ -119,6 +128,11 @@ async def _fetch_series(
         return [], "FRED API key not configured"
 
     async with semaphore:
+        logger.info(
+            "Attempt macro fetch: provider=fred series=%s indicator=%s",
+            fred_series_id,
+            indicator.id,
+        )
         observations, error_reason = await client.get_series_observations(
             fred_series_id,
             limit=limit,
@@ -126,11 +140,41 @@ async def _fetch_series(
         )
 
     if error_reason:
+        logger.info(
+            "Result macro fetch: provider=fred series=%s indicator=%s -> %s",
+            fred_series_id,
+            indicator.id,
+            error_reason,
+        )
         return [], error_reason
     points = parse_fred_points(observations)
     if points:
+        logger.info(
+            "Result macro fetch: provider=fred series=%s indicator=%s -> SUCCESS points=%s",
+            fred_series_id,
+            indicator.id,
+            len(points),
+        )
         return list(reversed(points)), None
+    logger.info(
+        "Result macro fetch: provider=fred series=%s indicator=%s -> EMPTY",
+        fred_series_id,
+        indicator.id,
+    )
     return [], f"No data returned for {fred_series_id}"
+
+
+def log_macro_startup_validation() -> None:
+    for indicator in all_indicators():
+        if indicator.source.upper() == "FRED" and indicator.fred_series:
+            logger.info("Macro series mapping: indicator=%s provider=fred series=%s", indicator.id, indicator.fred_series)
+        elif indicator.source.lower() == "unsupported" or not indicator.fred_series:
+            logger.warning(
+                "Macro series unsupported: indicator=%s provider=%s series=%s",
+                indicator.id,
+                indicator.source,
+                indicator.fred_series or "none",
+            )
 
 
 async def get_series_payload(indicator_id: str, range_key: str) -> MacroSeriesResponse:

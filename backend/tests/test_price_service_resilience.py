@@ -211,6 +211,7 @@ async def test_timeout_returns_stale_or_empty_without_crash(monkeypatch):
     payload = await price_service.get_prices_payload(bypass_cache=True)
     assert payload.timed_out is True
     assert payload.tickers[0].status == "error"
+    assert payload.tickers[0].no_attempts_reason in {"TICKER_TIMEOUT", "NO_ATTEMPTS_EXECUTED", "GLOBAL_DEADLINE_EXHAUSTED"}
 
 
 @pytest.mark.asyncio
