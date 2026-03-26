@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import Column, DateTime, Float, String, Text, create_engine
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, Session
 
 
@@ -48,8 +50,29 @@ class IndicatorSeries(Base):
 
 class CacheStore:
     def __init__(self, db_url: str) -> None:
+        self._ensure_sqlite_parent_dir(db_url)
         self.engine = create_engine(db_url, future=True)
         Base.metadata.create_all(self.engine)
+
+    @staticmethod
+    def _ensure_sqlite_parent_dir(db_url: str) -> None:
+        """
+        SQLite URLs can reference files in directories that do not yet exist.
+        On first launch this leads to `sqlite3.OperationalError: unable to open database file`.
+        """
+        try:
+            url = make_url(db_url)
+        except Exception:
+            return
+        if url.drivername != "sqlite":
+            return
+        database = url.database or ""
+        if not database or database == ":memory:":
+            return
+        db_path = Path(database).expanduser()
+        if not db_path.is_absolute():
+            db_path = Path.cwd() / db_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
 
     def get_cache(self, key: str) -> Any | None:
         now = datetime.utcnow()

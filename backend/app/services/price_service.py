@@ -117,11 +117,33 @@ async def _request_with_retries(
             response = await client.get(url, params=params)
             response.raise_for_status()
             return response
-        except httpx.HTTPError as exc:
+        except httpx.HTTPStatusError as exc:
             attempt += 1
+            status_code = exc.response.status_code if exc.response is not None else None
+            # 4xx is usually a permanent error (bad symbol/params), so retrying only adds latency.
+            if status_code is not None and 400 <= status_code < 500:
+                logger.warning(
+                    "Request failed for %s with status=%s: %s",
+                    url,
+                    status_code,
+                    exc,
+                )
+                return None
             backoff = 0.4 * attempt
             if attempt > retries:
                 logger.warning("Request failed for %s after %s attempts: %s", url, attempt, exc)
+                return None
+            await asyncio.sleep(backoff)
+        except httpx.RequestError as exc:
+            attempt += 1
+            backoff = 0.4 * attempt
+            if attempt > retries:
+                logger.warning(
+                    "Connection failed for %s after %s attempts: %s",
+                    url,
+                    attempt,
+                    exc,
+                )
                 return None
             await asyncio.sleep(backoff)
 
@@ -448,7 +470,11 @@ async def get_prices_payload() -> PricesResponse:
 
     errors: dict[str, str] = {}
     timed_out = False
-    async with httpx.AsyncClient(timeout=effective_timeout) as client:
+    http_timeout = httpx.Timeout(
+        timeout=effective_timeout,
+        connect=min(2.5, effective_timeout),
+    )
+    async with httpx.AsyncClient(timeout=http_timeout) as client:
         semaphore = asyncio.Semaphore(settings.price_fetch_concurrency)
         tasks: dict[asyncio.Task, PriceConfig] = {}
         for config in PRICE_TICKERS:
@@ -457,7 +483,7 @@ async def get_prices_payload() -> PricesResponse:
             )
             tasks[task] = config
         done, pending = await asyncio.wait(tasks.keys(), timeout=effective_timeout)
-        tickers: list[dict] = []
+        ticker_by_id: dict[str, dict] = {}
         for task in done:
             config = tasks[task]
             try:
@@ -467,7 +493,7 @@ async def get_prices_payload() -> PricesResponse:
                 ticker = await _build_cached_payload(config, store, error=str(exc))
             if ticker.get("error"):
                 errors[config.id] = ticker["error"]
-            tickers.append(ticker)
+            ticker_by_id[config.id] = ticker
         if pending:
             timed_out = True
             logger.warning("Price fetch timed out for %s tickers", len(pending))
@@ -477,7 +503,9 @@ async def get_prices_payload() -> PricesResponse:
                 ticker = await _build_cached_payload(config, store, error="timeout")
                 if ticker.get("error"):
                     errors[config.id] = ticker["error"]
-                tickers.append(ticker)
+                ticker_by_id[config.id] = ticker
+
+    tickers = [ticker_by_id.get(config.id) for config in PRICE_TICKERS if ticker_by_id.get(config.id)]
 
     response = PricesResponse(
         as_of=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
