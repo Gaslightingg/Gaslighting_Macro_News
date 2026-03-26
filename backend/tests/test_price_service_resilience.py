@@ -148,3 +148,14 @@ async def test_cached_value_marked_stale_when_old(monkeypatch):
     latest = await price_service._ensure_latest(store, client=None, config=cfg, timeout_seconds=0.1)  # type: ignore[arg-type]
     assert latest is not None
     assert latest["status"] == "stale"
+
+
+@pytest.mark.asyncio
+async def test_known_unsupported_stooq_symbol_skips_network():
+    class NeverClient:
+        async def get(self, *_args, **_kwargs):
+            raise AssertionError("network should not be called for unsupported symbol")
+
+    rows, error = await price_service._fetch_stooq_rows(NeverClient(), "spx")  # type: ignore[arg-type]
+    assert rows == []
+    assert error == "unsupported_symbol"

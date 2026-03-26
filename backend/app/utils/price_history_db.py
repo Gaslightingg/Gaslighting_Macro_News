@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 import logging
 from pathlib import Path
+import sqlite3
 from typing import Any
 
 import aiosqlite
@@ -136,14 +137,21 @@ class PriceHistoryStore:
             for point in points
         ]
         async with self._write_lock:
-            await conn.executemany(
-                """
-                INSERT OR REPLACE INTO price_history (symbol, price, change_pct, as_of, source)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                rows,
-            )
-            await conn.commit()
+            for attempt in range(3):
+                try:
+                    await conn.executemany(
+                        """
+                        INSERT OR REPLACE INTO price_history (symbol, price, change_pct, as_of, source)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        rows,
+                    )
+                    await conn.commit()
+                    return
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc).lower() or attempt == 2:
+                        raise
+                    await asyncio.sleep(0.15 * (attempt + 1))
 
     async def get_latest(self, symbol: str) -> dict[str, Any] | None:
         conn = await self._get_connection()
@@ -165,21 +173,28 @@ class PriceHistoryStore:
     async def upsert_latest(self, symbol: str, payload: dict[str, Any]) -> None:
         conn = await self._get_connection()
         async with self._write_lock:
-            await conn.execute(
-                """
-                INSERT OR REPLACE INTO price_latest (
-                    symbol, price, change_pct, as_of, source
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    symbol,
-                    payload.get("value"),
-                    payload.get("change_pct"),
-                    payload.get("last_updated"),
-                    payload.get("source"),
-                ),
-            )
-            await conn.commit()
+            for attempt in range(3):
+                try:
+                    await conn.execute(
+                        """
+                        INSERT OR REPLACE INTO price_latest (
+                            symbol, price, change_pct, as_of, source
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            symbol,
+                            payload.get("value"),
+                            payload.get("change_pct"),
+                            payload.get("last_updated"),
+                            payload.get("source"),
+                        ),
+                    )
+                    await conn.commit()
+                    return
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc).lower() or attempt == 2:
+                        raise
+                    await asyncio.sleep(0.15 * (attempt + 1))
 
     async def get_meta(self, key: str) -> str | None:
         conn = await self._get_connection()
@@ -193,8 +208,15 @@ class PriceHistoryStore:
     async def set_meta(self, key: str, value: str) -> None:
         conn = await self._get_connection()
         async with self._write_lock:
-            await conn.execute(
-                "INSERT OR REPLACE INTO cache_meta (key, value) VALUES (?, ?)",
-                (key, value),
-            )
-            await conn.commit()
+            for attempt in range(3):
+                try:
+                    await conn.execute(
+                        "INSERT OR REPLACE INTO cache_meta (key, value) VALUES (?, ?)",
+                        (key, value),
+                    )
+                    await conn.commit()
+                    return
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc).lower() or attempt == 2:
+                        raise
+                    await asyncio.sleep(0.15 * (attempt + 1))

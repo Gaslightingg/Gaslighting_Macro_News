@@ -37,6 +37,7 @@ const PRICE_STATUS_TEXT = {
   seed: "Seed/demo value",
   error: "Fetch failed",
   empty: "No data yet",
+  unsupported: "Unsupported provider/symbol",
 };
 
 const describePriceStatus = (ticker) => {

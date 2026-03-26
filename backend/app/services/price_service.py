@@ -30,6 +30,14 @@ logger = logging.getLogger(__name__)
 LATEST_TTL = timedelta(minutes=15)
 HISTORY_TTL = timedelta(hours=24)
 SPARKLINE_POINTS = 120
+UNSUPPORTED_PROVIDER_SYMBOLS: dict[tuple[str, str], str] = {
+    ("stooq", "spx"): "unsupported_symbol",
+    ("stooq", "^spx"): "unsupported_symbol",
+    ("stooq", "ndx"): "unsupported_symbol",
+    ("stooq", "^ndx"): "unsupported_symbol",
+    ("stooq", "nq.f"): "unsupported_symbol",
+    ("stooq", "nq=f"): "unsupported_symbol",
+}
 
 _prices_cache: dict[str, object] = {"payload": None, "fetched_at": None}
 _prices_cache_lock = asyncio.Lock()
@@ -206,6 +214,9 @@ async def _fetch_stooq_rows(
     client: httpx.AsyncClient,
     stooq_symbol: str,
 ) -> tuple[list[dict[str, str]], str | None]:
+    unsupported_reason = UNSUPPORTED_PROVIDER_SYMBOLS.get(("stooq", stooq_symbol.lower()))
+    if unsupported_reason:
+        return [], unsupported_reason
     url = "https://stooq.com/q/d/l/"
     response = await _request_with_retries(client, url, {"s": stooq_symbol, "i": "d"})
     if response is None:
@@ -401,8 +412,6 @@ async def _ensure_history(
     if symbols.get("stooq"):
         fresh_points = await _fetch_stooq_history(client, symbols["stooq"])
         if fresh_points:
-            await store.upsert_history(config.id, fresh_points, "stooq")
-            await store.set_meta(meta_key, datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
             return fresh_points
 
     fresh_points = (
@@ -411,8 +420,6 @@ async def _ensure_history(
         else []
     )
     if fresh_points:
-        await store.upsert_history(config.id, fresh_points, "yfinance")
-        await store.set_meta(meta_key, datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
         return fresh_points
     return points
 
@@ -454,9 +461,8 @@ async def _ensure_latest(
                 "status": "live",
                 "quality": "high",
                 "tried_sources": tried_sources,
+                "_persist": True,
             }
-            await store.upsert_latest(config.id, payload)
-            await store.set_meta(meta_key, datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
             return payload
         error_reason = stooq_error or "stooq_failed"
 
@@ -478,9 +484,8 @@ async def _ensure_latest(
                 "status": "live",
                 "quality": "high",
                 "tried_sources": tried_sources,
+                "_persist": True,
             }
-            await store.upsert_latest(config.id, payload)
-            await store.set_meta(meta_key, datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
             return payload
         error_reason = "yfinance_failed"
 
@@ -592,7 +597,28 @@ async def get_prices_payload(*, bypass_cache: bool = False) -> PricesResponse:
 
     tickers = [ticker_by_id.get(config.id) for config in configs if ticker_by_id.get(config.id)]
     for ticker in tickers:
-        if ticker.get("error") or ticker.get("status") in {"error", "empty"}:
+        if ticker.get("status") == "live" and isinstance(ticker.get("value"), (int, float)):
+            ticker_id = str(ticker.get("id"))
+            latest_payload = {
+                "value": ticker.get("value"),
+                "change": ticker.get("change"),
+                "change_pct": ticker.get("change_pct"),
+                "last_updated": ticker.get("last_updated"),
+                "source": ticker.get("provider") or ticker.get("source"),
+            }
+            try:
+                await store.upsert_latest(ticker_id, latest_payload)
+                await store.set_meta(
+                    f"latest:{ticker_id}:updated_at",
+                    datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Price persistence failed for %s: %s", ticker_id, exc)
+                ticker["status"] = "stale"
+                ticker["error_reason"] = "persistence_failed"
+                ticker["error"] = str(exc)
+    for ticker in tickers:
+        if ticker.get("error") or ticker.get("status") in {"error", "empty", "unsupported"}:
             errors[str(ticker.get("id"))] = str(ticker.get("error") or ticker.get("error_reason") or "error")
 
     response = PricesResponse(
@@ -608,6 +634,7 @@ async def get_prices_payload(*, bypass_cache: bool = False) -> PricesResponse:
             "seed": sum(1 for t in tickers if t.get("status") == "seed"),
             "error": sum(1 for t in tickers if t.get("status") == "error"),
             "empty": sum(1 for t in tickers if t.get("status") == "empty"),
+            "unsupported": sum(1 for t in tickers if t.get("status") == "unsupported"),
         },
     )
     duration_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
@@ -711,7 +738,7 @@ async def _build_ticker_payload_inner(
             error_reason = "no_price_data"
         if (latest or {}).get("value") is None:
             seed = seed or _seed_for_config(config)
-            if seed:
+            if seed and allow_seed:
                 return normalize_price_ticker(
                     {
                         "id": config.id,
@@ -736,6 +763,8 @@ async def _build_ticker_payload_inner(
                 )
             safe_status = "empty"
             error_reason = error_reason or "no_price_data"
+            if error_reason in {"no_sources_configured", "unsupported_symbol"}:
+                safe_status = "unsupported"
             latest = {
                 "value": "N/A",
                 "change": "N/A",

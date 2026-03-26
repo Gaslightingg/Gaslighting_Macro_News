@@ -447,6 +447,7 @@ body {
 .status-badge.no_data,
 .status-badge.empty,
 .status-badge.error,
+.status-badge.unsupported,
 .quality-badge.low,
 .quality-badge.disabled,
 .quality-badge.n\\/a {
