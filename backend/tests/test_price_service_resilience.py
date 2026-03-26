@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from app.models.schemas import PricesResponse
 from app.services import price_service
 from app.services.price_catalog import PriceConfig
 
@@ -303,3 +304,49 @@ async def test_yfinance_failure_uses_stooq_fallback_chain(monkeypatch):
     assert latest["status"] == "live"
     assert latest["provider"] == "stooq"
     assert "stooq:spy.us" in latest["tried_sources"]
+
+
+@pytest.mark.asyncio
+async def test_shared_refresh_timeout_returns_snapshot(monkeypatch):
+    async def never_finishes(*_args, **_kwargs):
+        await asyncio.sleep(1)
+        return None
+
+    async def snapshot(*_args, **_kwargs):
+        return PricesResponse(as_of="2026-01-01T00:00:00Z", tickers=[], errors={}, timed_out=True, summary={})
+
+    monkeypatch.setattr(price_service, "_refresh_prices_payload", never_finishes)
+    monkeypatch.setattr(price_service, "_build_prices_snapshot", snapshot)
+    price_service._prices_refresh_task = None
+    payload = await price_service.get_prices_payload(bypass_cache=True, request_id="t1")
+    assert payload is not None
+    assert payload.timed_out is True
+
+
+@pytest.mark.asyncio
+async def test_shared_refresh_exception_returns_controlled_response(monkeypatch):
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("refresh failed")
+
+    monkeypatch.setattr(price_service, "_refresh_prices_payload", boom)
+    price_service._prices_refresh_task = None
+    payload = await price_service.get_prices_payload(bypass_cache=True, request_id="t2")
+    assert payload is not None
+    assert isinstance(payload, PricesResponse)
+
+
+@pytest.mark.asyncio
+async def test_timeout_without_snapshot_returns_empty_controlled_payload(monkeypatch):
+    async def never_finishes(*_args, **_kwargs):
+        await asyncio.sleep(1)
+        return None
+
+    async def no_snapshot(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(price_service, "_refresh_prices_payload", never_finishes)
+    monkeypatch.setattr(price_service, "_build_prices_snapshot", no_snapshot)
+    price_service._prices_refresh_task = None
+    payload = await price_service.get_prices_payload(bypass_cache=True, request_id="t3")
+    assert payload is not None
+    assert all(item.status == "empty" for item in payload.tickers)

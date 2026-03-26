@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 from fastapi import APIRouter, HTTPException
 
 from ..models.schemas import (
@@ -51,7 +53,11 @@ def healthcheck() -> HealthResponse:
 
 @router.get("/prices", response_model=PricesResponse)
 async def prices(bypass_cache: bool = False) -> PricesResponse:
-    return await get_prices_payload(bypass_cache=bypass_cache)
+    request_id = uuid4().hex[:12]
+    payload = await get_prices_payload(bypass_cache=bypass_cache, request_id=request_id)
+    if payload is None:
+        raise HTTPException(status_code=503, detail="Price service returned no payload")
+    return payload
 
 
 @router.get("/prices/debug/health", response_model=PriceProviderHealthResponse)

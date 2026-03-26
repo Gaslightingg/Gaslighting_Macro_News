@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     price_fetch_timeout_seconds: float = Field(default=8.0, validation_alias="PRICE_FETCH_TIMEOUT_SECONDS")
     price_fetch_concurrency: int = Field(default=4, validation_alias="PRICE_FETCH_CONCURRENCY")
     allow_seed_prices: bool = Field(default=False, validation_alias="ALLOW_SEED_PRICES")
+    debug_price_fetch: bool = Field(default=False, validation_alias="DEBUG_PRICE_FETCH")
     news_provider: str = Field(default="auto", validation_alias="NEWS_PROVIDER")
     tradingeconomics_api_key: Optional[str] = Field(default=None, validation_alias="TRADINGECONOMICS_API_KEY")
     news_timezone: str = Field(default="Europe/Moscow", validation_alias="NEWS_TIMEZONE")

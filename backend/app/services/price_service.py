@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import asyncio
+from contextvars import ContextVar
 import csv
 import logging
 from io import StringIO
@@ -45,6 +46,8 @@ _prices_cache_lock = asyncio.Lock()
 _prices_refresh_task: asyncio.Task | None = None
 _prices_refresh_lock = asyncio.Lock()
 _provider_cooldowns: dict[str, datetime] = {}
+_price_request_id: ContextVar[str] = ContextVar("price_request_id", default="-")
+_price_debug_enabled: ContextVar[bool] = ContextVar("price_debug_enabled", default=False)
 
 
 _store_cache: dict[str, PriceHistoryStore] = {}
@@ -85,6 +88,11 @@ def _provider_on_cooldown(provider: str) -> bool:
 
 def _set_provider_cooldown(provider: str, seconds: int) -> None:
     _provider_cooldowns[provider] = datetime.utcnow() + timedelta(seconds=seconds)
+
+
+def _log_attempt(message: str, *args) -> None:
+    if _price_debug_enabled.get():
+        logger.info("[PRICE_FETCH][rid=%s] " + message, _price_request_id.get(), *args)
 
 
 def _seed_for_config(config: PriceConfig) -> dict[str, object] | None:
@@ -401,7 +409,8 @@ def _log_ticker_result(
     planned_chain: list[str] | None = None,
 ) -> None:
     logger.info(
-        "price_fetch ticker=%s symbol=%s provider=%s status=%s source=%s latency_ms=%.1f error_reason=%s planned_chain=%s attempted_chain=%s",
+        "price_fetch rid=%s ticker=%s symbol=%s provider=%s status=%s source=%s latency_ms=%.1f error_reason=%s planned_chain=%s attempted_chain=%s",
+        _price_request_id.get(),
         config.id,
         config.symbol,
         provider or "none",
@@ -429,14 +438,32 @@ async def _ensure_history(
     plan = get_provider_plan(config.id)
     chain = plan.history_chain if plan else ()
     for attempt in chain:
+        started = perf_counter()
+        _log_attempt("ticker=%s history_attempt provider=%s symbol=%s", config.id, attempt.provider, attempt.symbol)
         if attempt.provider == "stooq":
             fresh_points = await _fetch_stooq_history(client, attempt.symbol)
         elif attempt.provider == "yfinance":
             fresh_points = await _fetch_yfinance_history(client, attempt.symbol, timeout_seconds=timeout_seconds)
         else:
             fresh_points = []
+        latency_ms = (perf_counter() - started) * 1000
         if fresh_points:
+            _log_attempt(
+                "ticker=%s history_result=SUCCESS provider=%s symbol=%s points=%s latency_ms=%.1f",
+                config.id,
+                attempt.provider,
+                attempt.symbol,
+                len(fresh_points),
+                latency_ms,
+            )
             return fresh_points
+        _log_attempt(
+            "ticker=%s history_result=ERROR provider=%s symbol=%s latency_ms=%.1f",
+            config.id,
+            attempt.provider,
+            attempt.symbol,
+            latency_ms,
+        )
     return points
 
 
@@ -462,14 +489,17 @@ async def _ensure_latest(
     tried_sources: list[str] = []
     error_reason: str | None = None
     for attempt in plan.latest_chain:
+        started = perf_counter()
         tried_sources.append(f"{attempt.provider}:{attempt.symbol}")
         latest: tuple[float, float, str] | None = None
         current_error: str | None = None
+        _log_attempt("ticker=%s attempt provider=%s symbol=%s", config.id, attempt.provider, attempt.symbol)
         if attempt.provider == "stooq":
             latest, current_error = await _fetch_stooq_latest(client, attempt.symbol)
         elif attempt.provider == "yfinance":
             latest = await _fetch_yfinance_latest(client, attempt.symbol, timeout_seconds=timeout_seconds)
             current_error = None if latest else "yfinance_failed"
+        latency_ms = (perf_counter() - started) * 1000
         if latest:
             value, change_pct, date = latest
             payload = {
@@ -485,7 +515,22 @@ async def _ensure_latest(
                 "tried_sources": tried_sources,
                 "_persist": True,
             }
+            _log_attempt(
+                "ticker=%s result=SUCCESS provider=%s symbol=%s latency_ms=%.1f",
+                config.id,
+                attempt.provider,
+                attempt.symbol,
+                latency_ms,
+            )
             return payload
+        _log_attempt(
+            "ticker=%s result=ERROR provider=%s symbol=%s latency_ms=%.1f reason=%s",
+            config.id,
+            attempt.provider,
+            attempt.symbol,
+            latency_ms,
+            current_error or "provider_error",
+        )
         error_reason = current_error or error_reason or "provider_error"
 
     if not tried_sources and error_reason is None:
@@ -502,8 +547,11 @@ async def _ensure_latest(
     return {"status": "error", "error_reason": error_reason, "tried_sources": tried_sources}
 
 
-async def get_prices_payload(*, bypass_cache: bool = False) -> PricesResponse:
+async def get_prices_payload(*, bypass_cache: bool = False, request_id: str | None = None) -> PricesResponse:
+    global _prices_refresh_task
     settings = get_settings()
+    request_token = _price_request_id.set(request_id or datetime.utcnow().strftime("%H%M%S%f"))
+    debug_token = _price_debug_enabled.set(settings.debug_price_fetch)
     if not bypass_cache:
         now = datetime.utcnow()
         async with _prices_cache_lock:
@@ -512,6 +560,8 @@ async def get_prices_payload(*, bypass_cache: bool = False) -> PricesResponse:
             cache_ttl = timedelta(seconds=settings.cache_ttl_prices)
             if isinstance(cached_at, datetime) and cached_payload and now - cached_at < cache_ttl:
                 logger.info("Prices cache hit (age=%.1fs)", (now - cached_at).total_seconds())
+                _price_request_id.reset(request_token)
+                _price_debug_enabled.reset(debug_token)
                 return cached_payload
 
     async with _prices_refresh_lock:
@@ -521,10 +571,30 @@ async def get_prices_payload(*, bypass_cache: bool = False) -> PricesResponse:
         refresh_task = _prices_refresh_task
 
     try:
-        return await asyncio.wait_for(refresh_task, timeout=2.2)
+        payload = await asyncio.wait_for(asyncio.shield(refresh_task), timeout=2.2)
+        if payload is None:
+            logger.error("Prices refresh returned None; using controlled snapshot")
+            payload = await _build_prices_snapshot(error_reason="refresh_none")
+        return payload
     except asyncio.TimeoutError:
-        logger.warning("Shared prices refresh timed out; serving stale snapshot")
-        return await _build_prices_snapshot(error_reason="refresh_timeout")
+        snapshot = await _build_prices_snapshot(error_reason="refresh_timeout")
+        if snapshot is not None:
+            logger.warning("Shared prices refresh timed out; serving stale snapshot")
+            return snapshot
+        logger.error("Shared prices refresh timed out and no snapshot available")
+        return await _build_empty_prices_response("refresh_timeout_no_snapshot")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Shared prices refresh failed: %s", exc)
+        async with _prices_refresh_lock:
+            if _prices_refresh_task is refresh_task:
+                _prices_refresh_task = None
+        snapshot = await _build_prices_snapshot(error_reason="refresh_failed")
+        if snapshot is not None:
+            return snapshot
+        return await _build_empty_prices_response("refresh_failed_no_snapshot")
+    finally:
+        _price_request_id.reset(request_token)
+        _price_debug_enabled.reset(debug_token)
 
 
 async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesResponse:
@@ -947,6 +1017,41 @@ async def _build_prices_snapshot(error_reason: str | None = None) -> PricesRespo
         timed_out=True if error_reason else False,
         cache_bypassed=False,
         summary=summary,
+    )
+
+
+async def _build_empty_prices_response(reason: str) -> PricesResponse:
+    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    tickers = []
+    for config in PRICE_TICKERS:
+        tickers.append(
+            normalize_price_ticker(
+                {
+                    "id": config.id,
+                    "symbol": config.symbol,
+                    "name": config.name,
+                    "asset_class": config.asset_class,
+                    "unit": config.unit,
+                    "value": "N/A",
+                    "last_updated": "N/A",
+                    "history_points": [],
+                    "history_meta": _history_meta([]),
+                },
+                now=datetime.utcnow(),
+                source=None,
+                provider=None,
+                status="empty",
+                error=reason,
+                error_reason=reason,
+                tried_sources=[],
+            )
+        )
+    return PricesResponse(
+        as_of=now,
+        tickers=tickers,
+        errors={t["id"]: reason for t in tickers},
+        timed_out=True,
+        summary={"empty": len(tickers), "error": 0, "stale": 0, "live": 0, "cache": 0, "seed": 0, "unsupported": 0},
     )
 
 
