@@ -625,6 +625,7 @@ async def test_db_locked_during_persistence_does_not_break_prices_payload(monkey
     assert payload is not None
     assert len(payload.tickers) == 1
     assert payload.tickers[0].status == "live"
+    await asyncio.sleep(0.75)
     assert store.calls == 3
 
 
@@ -706,3 +707,110 @@ async def test_empty_no_cache_case_when_all_live_providers_fail(monkeypatch):
     latest = await price_service._ensure_latest(store, client=None, config=cfg, timeout_seconds=0.1)  # type: ignore[arg-type]
     assert latest is not None
     assert latest["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_live_fetch_survives_persistence_failure(monkeypatch):
+    cfg = PriceConfig("sp500", "S&P500", "S&P 500", "index", "pts", "", (), "^GSPC")
+    monkeypatch.setattr(price_service, "PRICE_TICKERS", (cfg,))
+
+    async def fake_build(*_args, **_kwargs):
+        return {
+            "id": "sp500",
+            "symbol": "S&P500",
+            "name": "S&P 500",
+            "asset_class": "index",
+            "unit": "pts",
+            "value": 5000.0,
+            "change": 0.5,
+            "change_pct": 0.5,
+            "last_updated": "2026-01-01",
+            "as_of": "2026-01-01T00:00:00Z",
+            "source": "stooq",
+            "provider": "stooq",
+            "status": "live",
+            "quality": "high",
+            "history_points": [],
+            "history_meta": {"data_start": None, "data_end": None, "interval": "1d", "points_count": 0},
+            "tried_sources": ["stooq:spy.us"],
+            "stale": False,
+        }
+
+    async def fake_store():
+        return _FakeStore()
+
+    async def persist_fail(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(price_service, "_build_ticker_payload", fake_build)
+    monkeypatch.setattr(price_service, "_get_store", fake_store)
+    monkeypatch.setattr(price_service, "_persist_latest_with_retry", persist_fail)
+    payload = await price_service.get_prices_payload(bypass_cache=True, request_id="persist-fail")
+    assert payload.tickers[0].status == "live"
+    assert payload.summary["ok_live"] == 1
+
+
+@pytest.mark.asyncio
+async def test_persistence_retry_does_not_block_response_completion(monkeypatch):
+    cfg = PriceConfig("sp500", "S&P500", "S&P 500", "index", "pts", "", (), "^GSPC")
+    monkeypatch.setattr(price_service, "PRICE_TICKERS", (cfg,))
+
+    async def fake_build(*_args, **_kwargs):
+        return {
+            "id": "sp500",
+            "symbol": "S&P500",
+            "name": "S&P 500",
+            "asset_class": "index",
+            "unit": "pts",
+            "value": 5000.0,
+            "change": 0.5,
+            "change_pct": 0.5,
+            "last_updated": "2026-01-01",
+            "as_of": "2026-01-01T00:00:00Z",
+            "source": "stooq",
+            "provider": "stooq",
+            "status": "live",
+            "quality": "high",
+            "history_points": [],
+            "history_meta": {"data_start": None, "data_end": None, "interval": "1d", "points_count": 0},
+            "tried_sources": ["stooq:spy.us"],
+            "stale": False,
+        }
+
+    async def fake_store():
+        return _FakeStore()
+
+    def slow_schedule(*_args, **_kwargs):
+        async def _slow():
+            await asyncio.sleep(0.5)
+        asyncio.create_task(_slow())
+
+    monkeypatch.setattr(price_service, "_build_ticker_payload", fake_build)
+    monkeypatch.setattr(price_service, "_get_store", fake_store)
+    monkeypatch.setattr(price_service, "_schedule_persistence", slow_schedule)
+    started = perf_counter()
+    payload = await price_service.get_prices_payload(bypass_cache=True, request_id="slow-persist")
+    elapsed = perf_counter() - started
+    assert payload.summary["ok_live"] == 1
+    assert elapsed < 0.2
+
+
+@pytest.mark.asyncio
+async def test_follower_gets_fresh_while_persistence_retries(monkeypatch):
+    async def refresh(*_args, **_kwargs):
+        return PricesResponse(as_of="2026-01-01T00:00:00Z", tickers=[], errors={}, timed_out=False, summary={"ok_live": 1})
+
+    def slow_schedule(*_args, **_kwargs):
+        async def _slow():
+            await asyncio.sleep(0.5)
+        asyncio.create_task(_slow())
+
+    monkeypatch.setattr(price_service, "_refresh_prices_payload", refresh)
+    monkeypatch.setattr(price_service, "_schedule_persistence", slow_schedule)
+    monkeypatch.setattr(price_service, "SHARED_WAITER_TIMEOUT_SECONDS", 0.2)
+    first, second = await asyncio.gather(
+        price_service.get_prices_payload(bypass_cache=True, request_id="owner-p"),
+        price_service.get_prices_payload(bypass_cache=True, request_id="follower-p"),
+    )
+    assert first.timed_out is False
+    assert second.timed_out is False

@@ -56,6 +56,8 @@ _cache_snapshot_version: int = 0
 _price_request_id: ContextVar[str] = ContextVar("price_request_id", default="-")
 _price_debug_enabled: ContextVar[bool] = ContextVar("price_debug_enabled", default=False)
 SHARED_WAITER_TIMEOUT_SECONDS = 2.2
+_persistence_write_lock = asyncio.Lock()
+_persistence_tasks: set[asyncio.Task] = set()
 
 
 _store_cache: dict[str, PriceHistoryStore] = {}
@@ -204,6 +206,35 @@ async def _persist_latest_with_retry(store: PriceHistoryStore, ticker_id: str, l
                 backoff,
             )
             await asyncio.sleep(backoff)
+
+
+async def _persist_live_tickers_background(store: PriceHistoryStore, tickers: list[dict], request_id: str) -> None:
+    persistence_errors = 0
+    async with _persistence_write_lock:
+        for ticker in tickers:
+            ticker_id = str(ticker.get("id"))
+            latest_payload = {
+                "value": ticker.get("value"),
+                "change": ticker.get("change"),
+                "change_pct": ticker.get("change_pct"),
+                "last_updated": ticker.get("last_updated"),
+                "source": ticker.get("provider") or ticker.get("source"),
+            }
+            try:
+                await _persist_latest_with_retry(store, ticker_id, latest_payload)
+            except Exception as exc:  # noqa: BLE001
+                persistence_errors += 1
+                logger.warning("Price persistence failed for %s rid=%s: %s", ticker_id, request_id, exc)
+    if persistence_errors:
+        logger.warning("persistence_batch_completed rid=%s persistence_errors=%s", request_id, persistence_errors)
+
+
+def _schedule_persistence(store: PriceHistoryStore, tickers: list[dict], request_id: str) -> None:
+    if not tickers:
+        return
+    task = asyncio.create_task(_persist_live_tickers_background(store, tickers, request_id))
+    _persistence_tasks.add(task)
+    task.add_done_callback(_persistence_tasks.discard)
 
 
 def _seed_for_config(config: PriceConfig) -> dict[str, object] | None:
@@ -923,7 +954,7 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
 
     errors: dict[str, str] = {}
     timed_out = False
-    refresh_deadline = perf_counter() + 2.0
+    refresh_deadline = perf_counter() + max(4.0, effective_timeout * 3)
     http_timeout = httpx.Timeout(
         timeout=effective_timeout,
         connect=min(1.0, effective_timeout),
@@ -1042,28 +1073,18 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
                 ticker_by_id[key] = ticker
 
     tickers = [_sanitize_ticker_numeric_fields(ticker_by_id.get(config.id)) for config in configs if ticker_by_id.get(config.id)]
-    for ticker in tickers:
-        if ticker.get("status") == "live" and isinstance(ticker.get("value"), (int, float)):
-            ticker_id = str(ticker.get("id"))
-            latest_payload = {
-                "value": ticker.get("value"),
-                "change": ticker.get("change"),
-                "change_pct": ticker.get("change_pct"),
-                "last_updated": ticker.get("last_updated"),
-                "source": ticker.get("provider") or ticker.get("source"),
-            }
-            try:
-                await _persist_latest_with_retry(store, ticker_id, latest_payload)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Price persistence failed for %s: %s", ticker_id, exc)
-                ticker["status"] = "stale"
-                ticker["error_reason"] = "persistence_failed"
-                ticker["error"] = str(exc)
+    live_tickers_for_persistence = [
+        ticker for ticker in tickers
+        if ticker.get("status") == "live" and isinstance(ticker.get("value"), (int, float))
+    ]
+    _schedule_persistence(store, live_tickers_for_persistence, _price_request_id.get())
     for ticker in tickers:
         if ticker.get("error") or ticker.get("status") in {"error", "empty", "unsupported"}:
             errors[str(ticker.get("id"))] = str(ticker.get("error") or ticker.get("error_reason") or "error")
 
     summary = _build_prices_summary(tickers)
+    summary["persistence_errors"] = 0
+    summary["persistence_queued"] = len(live_tickers_for_persistence)
     response = PricesResponse(
         as_of=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         tickers=tickers,
