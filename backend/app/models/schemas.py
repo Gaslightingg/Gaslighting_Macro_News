@@ -23,8 +23,8 @@ class PriceTicker(BaseModel):
     name: str
     asset_class: str
     unit: str | None
-    value: float | str | None
-    change: float | str | None
+    value: float | None
+    change: float | None
     change_pct: float | None
     last_updated: str | None
     as_of: str | None = None

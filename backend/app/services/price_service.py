@@ -5,6 +5,7 @@ import asyncio
 from contextvars import ContextVar
 import csv
 import logging
+import sqlite3
 from io import StringIO
 import json
 from pathlib import Path
@@ -20,7 +21,7 @@ from ..models.schemas import (
     PriceProviderHealthResponse,
     PricesResponse,
 )
-from ..providers.price_normalizer import normalize_price_ticker
+from ..providers.price_normalizer import normalize_optional_float, normalize_price_ticker
 from ..services.price_catalog import PRICE_TICKERS, PriceConfig, resolve_price_config
 from ..services.provider_map import get_provider_plan
 from ..services.symbols import get_symbol_mapping
@@ -100,6 +101,53 @@ def _set_provider_cooldown(provider: str, seconds: int) -> None:
 def _log_attempt(message: str, *args) -> None:
     if _price_debug_enabled.get():
         logger.info("[PRICE_FETCH][rid=%s] " + message, _price_request_id.get(), *args)
+
+
+def _sanitize_ticker_numeric_fields(ticker: dict) -> dict:
+    raw_value = ticker.get("value")
+    raw_change = ticker.get("change")
+    raw_change_pct = ticker.get("change_pct")
+    ticker["value"] = normalize_optional_float(raw_value)
+    ticker["change"] = normalize_optional_float(raw_change)
+    ticker["change_pct"] = normalize_optional_float(raw_change_pct)
+
+    invalid_numeric = False
+    for raw, normalized in (
+        (raw_value, ticker["value"]),
+        (raw_change, ticker["change"]),
+        (raw_change_pct, ticker["change_pct"]),
+    ):
+        if raw is not None and normalized is None:
+            invalid_numeric = True
+
+    if invalid_numeric:
+        ticker["error_reason"] = ticker.get("error_reason") or "invalid_numeric_payload"
+        ticker["error"] = ticker.get("error") or "invalid numeric value in ticker payload"
+        if ticker.get("status") in {"live", "cached", "stale", "seed"}:
+            ticker["status"] = "error"
+    return ticker
+
+
+async def _persist_latest_with_retry(store: PriceHistoryStore, ticker_id: str, latest_payload: dict) -> None:
+    for attempt in range(3):
+        try:
+            await store.upsert_latest(ticker_id, latest_payload)
+            await store.set_meta(
+                f"latest:{ticker_id}:updated_at",
+                datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or attempt == 2:
+                raise
+            backoff = 0.2 * (attempt + 1)
+            logger.warning(
+                "Price persistence locked for %s; retrying attempt=%s backoff=%.2fs",
+                ticker_id,
+                attempt + 1,
+                backoff,
+            )
+            await asyncio.sleep(backoff)
 
 
 def _seed_for_config(config: PriceConfig) -> dict[str, object] | None:
@@ -867,7 +915,7 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
                 key, ticker = result
                 ticker_by_id[key] = ticker
 
-    tickers = [ticker_by_id.get(config.id) for config in configs if ticker_by_id.get(config.id)]
+    tickers = [_sanitize_ticker_numeric_fields(ticker_by_id.get(config.id)) for config in configs if ticker_by_id.get(config.id)]
     for ticker in tickers:
         if ticker.get("status") == "live" and isinstance(ticker.get("value"), (int, float)):
             ticker_id = str(ticker.get("id"))
@@ -879,11 +927,7 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
                 "source": ticker.get("provider") or ticker.get("source"),
             }
             try:
-                await store.upsert_latest(ticker_id, latest_payload)
-                await store.set_meta(
-                    f"latest:{ticker_id}:updated_at",
-                    datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-                )
+                await _persist_latest_with_retry(store, ticker_id, latest_payload)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Price persistence failed for %s: %s", ticker_id, exc)
                 ticker["status"] = "stale"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import math
 from datetime import datetime
 
 
@@ -35,6 +36,32 @@ def infer_unit(asset_class: str) -> str | None:
     return None
 
 
+def normalize_optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            return None
+        return numeric
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        if cleaned.lower() in {"n/a", "na", "none", "null", "-", "--", "nan", "inf", "+inf", "-inf"}:
+            return None
+        try:
+            numeric = float(cleaned.replace(",", ""))
+        except ValueError:
+            return None
+        if not math.isfinite(numeric):
+            return None
+        return numeric
+    return None
+
+
 def normalize_price_ticker(
     raw: dict,
     *,
@@ -52,8 +79,15 @@ def normalize_price_ticker(
     value = raw.get("price")
     if value is None:
         value = raw.get("value")
-    change_pct = raw.get("change_pct")
-    change = raw.get("change")
+    change_pct_raw = raw.get("change_pct")
+    change_raw = raw.get("change")
+    if change_pct_raw is None and change_raw is not None:
+        change_pct_raw = change_raw
+    if change_raw is None and change_pct_raw is not None:
+        change_raw = change_pct_raw
+    value = normalize_optional_float(value)
+    change = normalize_optional_float(change_raw)
+    change_pct = normalize_optional_float(change_pct_raw)
     if change_pct is None and change is not None:
         change_pct = change
     if change is None and change_pct is not None:

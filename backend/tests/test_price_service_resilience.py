@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from app.models.schemas import PricesResponse
+from app.providers.price_normalizer import normalize_optional_float
 from app.services import price_service
 from app.services.price_catalog import PriceConfig
 
@@ -416,3 +417,78 @@ async def test_owner_and_follower_return_fresh_without_timeout_fallback(monkeypa
     assert "timeout_branch_entered rid=owner-rid" not in caplog.text
     assert "timeout_branch_entered rid=follower-rid" not in caplog.text
     assert "Shared prices refresh timed out; serving stale snapshot" not in caplog.text
+
+
+def test_normalize_optional_float_handles_na_values():
+    assert normalize_optional_float("N/A") is None
+    assert normalize_optional_float("") is None
+    assert normalize_optional_float(None) is None
+    assert normalize_optional_float("12.5") == 12.5
+
+
+@pytest.mark.asyncio
+async def test_invalid_numeric_ticker_does_not_crash_prices_response(monkeypatch):
+    configs = (
+        PriceConfig("good", "GOOD", "Good", "index", "pts", "", (), "GOOD"),
+        PriceConfig("bad", "BAD", "Bad", "index", "pts", "", (), "BAD"),
+    )
+    monkeypatch.setattr(price_service, "PRICE_TICKERS", configs)
+
+    async def fake_build(config, *_args, **_kwargs):
+        if config.id == "bad":
+            return {
+                "id": "bad",
+                "symbol": "BAD",
+                "name": "Bad",
+                "asset_class": "index",
+                "unit": "pts",
+                "value": "N/A",
+                "change": "N/A",
+                "change_pct": "N/A",
+                "last_updated": "2026-01-01",
+                "as_of": "2026-01-01T00:00:00Z",
+                "source": "stooq",
+                "provider": "stooq",
+                "status": "live",
+                "quality": "high",
+                "history_points": [],
+                "history_meta": {"data_start": None, "data_end": None, "interval": "1d", "points_count": 0},
+                "tried_sources": ["stooq:bad"],
+                "stale": False,
+            }
+        return {
+            "id": "good",
+            "symbol": "GOOD",
+            "name": "Good",
+            "asset_class": "index",
+            "unit": "pts",
+            "value": 101.0,
+            "change": 0.5,
+            "change_pct": 0.5,
+            "last_updated": "2026-01-01",
+            "as_of": "2026-01-01T00:00:00Z",
+            "source": "stooq",
+            "provider": "stooq",
+            "status": "live",
+            "quality": "high",
+            "history_points": [],
+            "history_meta": {"data_start": None, "data_end": None, "interval": "1d", "points_count": 0},
+            "tried_sources": ["stooq:good"],
+            "stale": False,
+        }
+
+    async def fake_store():
+        return _FakeStore()
+
+    monkeypatch.setattr(price_service, "_build_ticker_payload", fake_build)
+    monkeypatch.setattr(price_service, "_get_store", fake_store)
+    price_service._prices_refresh_task = None
+
+    payload = await price_service.get_prices_payload(bypass_cache=True, request_id="mixed-numeric")
+    assert len(payload.tickers) == 2
+    assert any(t.id == "good" and t.status == "live" for t in payload.tickers)
+    bad_ticker = next(t for t in payload.tickers if t.id == "bad")
+    assert bad_ticker.value is None
+    assert bad_ticker.change is None
+    assert bad_ticker.change_pct is None
+    assert bad_ticker.status == "error"
