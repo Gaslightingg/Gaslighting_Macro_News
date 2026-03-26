@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from datetime import datetime, timedelta
+from time import perf_counter
 
 import pytest
 
@@ -252,7 +254,16 @@ async def test_summary_counters_consistent(monkeypatch):
     monkeypatch.setattr(price_service, "_build_ticker_payload", fake_build)
     monkeypatch.setattr(price_service, "_get_store", fake_store)
     payload = await price_service.get_prices_payload(bypass_cache=True)
-    assert payload.summary["live"] + payload.summary["stale"] == len(payload.tickers)
+    terminal_total = (
+        payload.summary["ok_live"]
+        + payload.summary["ok_cached"]
+        + payload.summary["stale_db"]
+        + payload.summary["empty"]
+        + payload.summary["error"]
+    )
+    assert terminal_total == len(payload.tickers)
+    assert payload.summary["ok_live"] == 1
+    assert payload.summary["stale_db"] == 1
 
 
 @pytest.mark.asyncio
@@ -419,6 +430,35 @@ async def test_owner_and_follower_return_fresh_without_timeout_fallback(monkeypa
     assert "Shared prices refresh timed out; serving stale snapshot" not in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_cache_hit_returns_fast_payload(monkeypatch):
+    async def refresh(*_args, **_kwargs):
+        await asyncio.sleep(0.04)
+        return PricesResponse(as_of="2026-01-01T00:00:00Z", tickers=[], errors={}, timed_out=False, summary={})
+
+    monkeypatch.setattr(price_service, "_refresh_prices_payload", refresh)
+    monkeypatch.setattr(price_service, "get_settings", lambda: type("S", (), {
+        "cache_ttl_prices": 30,
+        "price_fetch_timeout_seconds": 0.2,
+        "price_fetch_concurrency": 1,
+        "allow_seed_prices": False,
+        "debug_price_fetch": False,
+    })())
+    price_service._prices_refresh_task = None
+    price_service._prices_cache["payload"] = None
+    price_service._prices_cache["fetched_at"] = None
+
+    started_refresh = perf_counter()
+    await price_service.get_prices_payload(bypass_cache=False, request_id="cache-a")
+    refresh_elapsed = perf_counter() - started_refresh
+
+    started_cache = perf_counter()
+    await price_service.get_prices_payload(bypass_cache=False, request_id="cache-b")
+    cache_elapsed = perf_counter() - started_cache
+    assert cache_elapsed < refresh_elapsed
+    assert cache_elapsed < 0.02
+
+
 def test_normalize_optional_float_handles_na_values():
     assert normalize_optional_float("N/A") is None
     assert normalize_optional_float("") is None
@@ -492,3 +532,97 @@ async def test_invalid_numeric_ticker_does_not_crash_prices_response(monkeypatch
     assert bad_ticker.change is None
     assert bad_ticker.change_pct is None
     assert bad_ticker.status == "error"
+
+
+@pytest.mark.asyncio
+async def test_yahoo_429_sets_cooldown_and_fallback_does_not_crash(monkeypatch):
+    cfg = PriceConfig("sp500", "S&P500", "S&P 500", "index", "pts", "", (), "^GSPC")
+    store = _FakeStore()
+
+    async def rate_limited(*_args, **_kwargs):
+        price_service._set_provider_cooldown("yfinance", seconds=60)
+        return None
+
+    async def stooq_ok(*_args, **_kwargs):
+        return 5000.0, 0.7, "2026-01-01"
+
+    monkeypatch.setattr(price_service, "_fetch_yfinance_latest", rate_limited)
+    monkeypatch.setattr(price_service, "_fetch_stooq_latest", stooq_ok)
+    latest = await price_service._ensure_latest(store, client=None, config=cfg, timeout_seconds=0.1)  # type: ignore[arg-type]
+    assert latest is not None
+    assert latest["status"] == "live"
+    assert latest["source"] == "stooq"
+    assert price_service._provider_on_cooldown("yfinance") is True
+
+
+@pytest.mark.asyncio
+async def test_stooq_malformed_rows_become_parse_error_without_crash(monkeypatch):
+    cfg = PriceConfig("sp500", "S&P500", "S&P 500", "index", "pts", "", (), "^GSPC")
+    store = _FakeStore()
+
+    async def malformed_stooq(*_args, **_kwargs):
+        return None, "stooq_missing_columns"
+
+    async def no_yf(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(price_service, "_fetch_stooq_latest", malformed_stooq)
+    monkeypatch.setattr(price_service, "_fetch_yfinance_latest", no_yf)
+    latest = await price_service._ensure_latest(store, client=None, config=cfg, timeout_seconds=0.1)  # type: ignore[arg-type]
+    assert latest is not None
+    assert latest["status"] == "error"
+    assert latest["error_reason"] in {"stooq_missing_columns", "yfinance_failed"}
+
+
+@pytest.mark.asyncio
+async def test_db_locked_during_persistence_does_not_break_prices_payload(monkeypatch):
+    cfg = PriceConfig("ok", "OK", "Okay", "index", "pts", "ok", (), "OK")
+    monkeypatch.setattr(price_service, "PRICE_TICKERS", (cfg,))
+
+    async def fake_build(*_args, **_kwargs):
+        return {
+            "id": "ok",
+            "symbol": "OK",
+            "name": "Okay",
+            "asset_class": "index",
+            "unit": "pts",
+            "value": 10.0,
+            "change": 0.1,
+            "change_pct": 0.1,
+            "last_updated": "2026-01-01",
+            "as_of": "2026-01-01T00:00:00Z",
+            "source": "stooq",
+            "provider": "stooq",
+            "status": "live",
+            "quality": "high",
+            "history_points": [],
+            "history_meta": {"data_start": None, "data_end": None, "interval": "1d", "points_count": 0},
+            "tried_sources": ["stooq:ok"],
+            "stale": False,
+        }
+
+    class LockingStore(_FakeStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def upsert_latest(self, symbol: str, payload: dict):
+            self.calls += 1
+            if self.calls < 3:
+                raise sqlite3.OperationalError("database is locked")
+            await super().upsert_latest(symbol, payload)
+
+    store = LockingStore()
+
+    async def fake_store():
+        return store
+
+    monkeypatch.setattr(price_service, "_build_ticker_payload", fake_build)
+    monkeypatch.setattr(price_service, "_get_store", fake_store)
+    price_service._prices_refresh_task = None
+
+    payload = await price_service.get_prices_payload(bypass_cache=True, request_id="db-lock")
+    assert payload is not None
+    assert len(payload.tickers) == 1
+    assert payload.tickers[0].status == "live"
+    assert store.calls == 3

@@ -128,6 +128,59 @@ def _sanitize_ticker_numeric_fields(ticker: dict) -> dict:
     return ticker
 
 
+def _terminal_status_from_ticker(ticker: dict) -> str:
+    status = str(ticker.get("status") or "empty")
+    if status == "live":
+        return "ok_live"
+    if status in {"cached", "seed"}:
+        return "ok_cached"
+    if status == "stale":
+        return "stale_db"
+    if status == "empty":
+        return "empty"
+    return "error"
+
+
+def _build_prices_summary(tickers: list[dict]) -> dict[str, int]:
+    summary = {
+        "ok_live": 0,
+        "ok_cached": 0,
+        "stale_db": 0,
+        "empty": 0,
+        "error": 0,
+        "provider_attempt_errors": 0,
+        "provider_rate_limits": 0,
+        "provider_parse_errors": 0,
+        "live": 0,
+        "cache": 0,
+        "stale": 0,
+        "seed": 0,
+        "unsupported": 0,
+    }
+    for ticker in tickers:
+        terminal = _terminal_status_from_ticker(ticker)
+        summary[terminal] += 1
+        raw_status = str(ticker.get("status") or "")
+        if raw_status == "live":
+            summary["live"] += 1
+        elif raw_status == "cached":
+            summary["cache"] += 1
+        elif raw_status == "stale":
+            summary["stale"] += 1
+        elif raw_status == "seed":
+            summary["seed"] += 1
+        elif raw_status == "unsupported":
+            summary["unsupported"] += 1
+        error_reason = str(ticker.get("error_reason") or "")
+        if error_reason:
+            summary["provider_attempt_errors"] += 1
+            if "rate_limit" in error_reason or "429" in error_reason:
+                summary["provider_rate_limits"] += 1
+            if "parse" in error_reason or "missing_columns" in error_reason or "non_csv" in error_reason:
+                summary["provider_parse_errors"] += 1
+    return summary
+
+
 async def _persist_latest_with_retry(store: PriceHistoryStore, ticker_id: str, latest_payload: dict) -> None:
     for attempt in range(3):
         try:
@@ -871,6 +924,15 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
                 ticker["provider_loop_started"] = bool(ticker.get("tried_sources"))
             if not ticker.get("tried_sources") and not ticker.get("no_attempts_reason"):
                 ticker["no_attempts_reason"] = "no_attempts_executed"
+            if ticker.get("provider_loop_started") and not ticker.get("tried_sources"):
+                logger.warning(
+                    "ticker=%s provider_loop_started=true but attempted_chain is empty; resetting flag",
+                    config.id,
+                )
+                ticker["provider_loop_started"] = False
+                ticker["no_attempts_reason"] = ticker.get("no_attempts_reason") or "provider_loop_flag_without_attempts"
+            if (not ticker.get("provider_loop_started")) and ticker.get("tried_sources"):
+                ticker["provider_loop_started"] = True
             plan = get_provider_plan(config.id)
             planned_chain = [
                 f"{item.provider}:{item.symbol}"
@@ -937,37 +999,26 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
         if ticker.get("error") or ticker.get("status") in {"error", "empty", "unsupported"}:
             errors[str(ticker.get("id"))] = str(ticker.get("error") or ticker.get("error_reason") or "error")
 
+    summary = _build_prices_summary(tickers)
     response = PricesResponse(
         as_of=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         tickers=tickers,
         errors=errors,
         timed_out=timed_out,
         cache_bypassed=bypass_cache,
-        summary={
-            "live": sum(1 for t in tickers if t.get("status") == "live"),
-            "cache": sum(1 for t in tickers if t.get("status") == "cached"),
-            "stale": sum(1 for t in tickers if t.get("status") == "stale"),
-            "seed": sum(1 for t in tickers if t.get("status") == "seed"),
-            "error": sum(1 for t in tickers if t.get("status") == "error"),
-            "empty": sum(1 for t in tickers if t.get("status") == "empty"),
-            "unsupported": sum(1 for t in tickers if t.get("status") == "unsupported"),
-            "ok_live": sum(1 for t in tickers if t.get("status") == "live"),
-            "ok_cached": sum(1 for t in tickers if t.get("status") == "cached"),
-            "stale_db": sum(1 for t in tickers if t.get("status") == "stale"),
-        },
+        summary=summary,
     )
     duration_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
-    ok_count = sum(1 for ticker in tickers if isinstance(ticker.get("value"), (int, float)))
-    seed_count = sum(1 for ticker in tickers if ticker.get("status") == "seed")
-    stale_count = sum(1 for ticker in tickers if ticker.get("status") in {"stale", "cached"})
     logger.info(
-        "Prices fetch completed in %.1fms (tickers=%s, updated=%s, stale=%s, seed=%s, errors=%s, timed_out=%s, cache_hit=%s)",
+        "Prices fetch completed in %.1fms (tickers=%s, ok_live=%s, ok_cached=%s, stale_db=%s, empty=%s, error=%s, provider_attempt_errors=%s, timed_out=%s, cache_hit=%s)",
         duration_ms,
         len(tickers),
-        ok_count,
-        stale_count,
-        seed_count,
-        len(errors),
+        summary.get("ok_live", 0),
+        summary.get("ok_cached", 0),
+        summary.get("stale_db", 0),
+        summary.get("empty", 0),
+        summary.get("error", 0),
+        summary.get("provider_attempt_errors", 0),
         timed_out,
         cache_hit,
     )
@@ -1246,18 +1297,7 @@ async def _build_prices_snapshot(error_reason: str | None = None) -> PricesRespo
         tickers.append(ticker)
         if ticker.get("status") in {"error", "empty", "unsupported"}:
             errors[str(ticker.get("id"))] = str(ticker.get("error_reason") or ticker.get("error") or "error")
-    summary = {
-        "live": sum(1 for t in tickers if t.get("status") == "live"),
-        "cache": sum(1 for t in tickers if t.get("status") == "cached"),
-        "stale": sum(1 for t in tickers if t.get("status") == "stale"),
-        "seed": sum(1 for t in tickers if t.get("status") == "seed"),
-        "ok_live": sum(1 for t in tickers if t.get("status") == "live"),
-        "ok_cached": sum(1 for t in tickers if t.get("status") == "cached"),
-        "stale_db": sum(1 for t in tickers if t.get("status") == "stale"),
-        "empty": sum(1 for t in tickers if t.get("status") == "empty"),
-        "error": sum(1 for t in tickers if t.get("status") in {"error", "unsupported"}),
-        "unsupported": sum(1 for t in tickers if t.get("status") == "unsupported"),
-    }
+    summary = _build_prices_summary(tickers)
     return PricesResponse(
         as_of=now,
         tickers=tickers,
@@ -1299,7 +1339,7 @@ async def _build_empty_prices_response(reason: str) -> PricesResponse:
         tickers=tickers,
         errors={t["id"]: reason for t in tickers},
         timed_out=True,
-        summary={"empty": len(tickers), "error": 0, "stale": 0, "live": 0, "cache": 0, "seed": 0, "unsupported": 0},
+        summary=_build_prices_summary(tickers),
     )
 
 
