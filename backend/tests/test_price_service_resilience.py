@@ -250,3 +250,56 @@ async def test_summary_counters_consistent(monkeypatch):
     monkeypatch.setattr(price_service, "_get_store", fake_store)
     payload = await price_service.get_prices_payload(bypass_cache=True)
     assert payload.summary["live"] + payload.summary["stale"] == len(payload.tickers)
+
+
+@pytest.mark.asyncio
+async def test_singleflight_coalesces_concurrent_refresh(monkeypatch):
+    calls = {"count": 0}
+
+    async def fake_refresh(*, bypass_cache=False):
+        calls["count"] += 1
+        await asyncio.sleep(0.05)
+        return type("Resp", (), {
+            "as_of": "2026-01-01T00:00:00Z",
+            "tickers": [],
+            "errors": {},
+            "timed_out": False,
+            "cache_bypassed": bypass_cache,
+            "summary": {},
+        })()
+
+    monkeypatch.setattr(price_service, "_refresh_prices_payload", fake_refresh)
+    price_service._prices_refresh_task = None
+    price_service._prices_cache["payload"] = None
+    price_service._prices_cache["fetched_at"] = None
+
+    await asyncio.gather(
+        price_service.get_prices_payload(bypass_cache=True),
+        price_service.get_prices_payload(bypass_cache=True),
+    )
+    assert calls["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_yfinance_failure_uses_stooq_fallback_chain(monkeypatch):
+    cfg = PriceConfig("sp500", "S&P500", "S&P 500", "index", "pts", "", (), "^GSPC")
+    store = _FakeStore()
+    calls: list[str] = []
+
+    async def no_yf(*_args, **_kwargs):
+        return None
+
+    async def stooq_ok(_client, symbol):
+        calls.append(symbol)
+        if symbol == "spy.us":
+            return 500.0, 0.4, "2026-01-02"
+        return None, "no_data"
+
+    monkeypatch.setattr(price_service, "_fetch_yfinance_latest", no_yf)
+    monkeypatch.setattr(price_service, "_fetch_stooq_latest", stooq_ok)
+
+    latest = await price_service._ensure_latest(store, client=None, config=cfg, timeout_seconds=0.1)  # type: ignore[arg-type]
+    assert latest is not None
+    assert latest["status"] == "live"
+    assert latest["provider"] == "stooq"
+    assert "stooq:spy.us" in latest["tried_sources"]

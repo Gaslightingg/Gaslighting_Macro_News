@@ -17,16 +17,40 @@ class InstrumentProviderPlan:
 
 PROVIDER_MAP: dict[str, InstrumentProviderPlan] = {
     "sp500": InstrumentProviderPlan(
-        latest_chain=(ProviderAttempt("yfinance", "^GSPC"), ProviderAttempt("yfinance", "SPY")),
-        history_chain=(ProviderAttempt("yfinance", "^GSPC"), ProviderAttempt("yfinance", "SPY")),
+        latest_chain=(
+            ProviderAttempt("yfinance", "^GSPC"),
+            ProviderAttempt("yfinance", "SPY"),
+            ProviderAttempt("stooq", "spy.us"),
+        ),
+        history_chain=(
+            ProviderAttempt("yfinance", "^GSPC"),
+            ProviderAttempt("yfinance", "SPY"),
+            ProviderAttempt("stooq", "spy.us"),
+        ),
     ),
     "nas100": InstrumentProviderPlan(
-        latest_chain=(ProviderAttempt("yfinance", "^NDX"), ProviderAttempt("yfinance", "QQQ")),
-        history_chain=(ProviderAttempt("yfinance", "^NDX"), ProviderAttempt("yfinance", "QQQ")),
+        latest_chain=(
+            ProviderAttempt("yfinance", "^NDX"),
+            ProviderAttempt("yfinance", "QQQ"),
+            ProviderAttempt("stooq", "qqq.us"),
+        ),
+        history_chain=(
+            ProviderAttempt("yfinance", "^NDX"),
+            ProviderAttempt("yfinance", "QQQ"),
+            ProviderAttempt("stooq", "qqq.us"),
+        ),
     ),
     "nqmini": InstrumentProviderPlan(
-        latest_chain=(ProviderAttempt("yfinance", "MNQ=F"), ProviderAttempt("yfinance", "NQ=F")),
-        history_chain=(ProviderAttempt("yfinance", "MNQ=F"), ProviderAttempt("yfinance", "NQ=F")),
+        latest_chain=(
+            ProviderAttempt("yfinance", "MNQ=F"),
+            ProviderAttempt("yfinance", "NQ=F"),
+            ProviderAttempt("stooq", "ndx.us"),
+        ),
+        history_chain=(
+            ProviderAttempt("yfinance", "MNQ=F"),
+            ProviderAttempt("yfinance", "NQ=F"),
+            ProviderAttempt("stooq", "ndx.us"),
+        ),
     ),
     "eurusd": InstrumentProviderPlan(
         latest_chain=(ProviderAttempt("stooq", "eurusd"), ProviderAttempt("yfinance", "EURUSD=X")),

@@ -42,6 +42,9 @@ UNSUPPORTED_PROVIDER_SYMBOLS: dict[tuple[str, str], str] = {
 
 _prices_cache: dict[str, object] = {"payload": None, "fetched_at": None}
 _prices_cache_lock = asyncio.Lock()
+_prices_refresh_task: asyncio.Task | None = None
+_prices_refresh_lock = asyncio.Lock()
+_provider_cooldowns: dict[str, datetime] = {}
 
 
 _store_cache: dict[str, PriceHistoryStore] = {}
@@ -68,6 +71,20 @@ def _load_seed_prices() -> dict[str, dict[str, object]]:
         logger.warning("Seed price file invalid JSON: %s", seed_path)
         _seed_cache = {}
     return _seed_cache
+
+
+def _provider_on_cooldown(provider: str) -> bool:
+    expires_at = _provider_cooldowns.get(provider)
+    if not expires_at:
+        return False
+    if datetime.utcnow() >= expires_at:
+        _provider_cooldowns.pop(provider, None)
+        return False
+    return True
+
+
+def _set_provider_cooldown(provider: str, seconds: int) -> None:
+    _provider_cooldowns[provider] = datetime.utcnow() + timedelta(seconds=seconds)
 
 
 def _seed_for_config(config: PriceConfig) -> dict[str, object] | None:
@@ -137,6 +154,11 @@ async def _request_with_retries(
         except httpx.HTTPStatusError as exc:
             attempt += 1
             status_code = exc.response.status_code if exc.response is not None else None
+            if status_code == 429:
+                if "query1.finance.yahoo.com" in url:
+                    _set_provider_cooldown("yfinance", seconds=60)
+                logger.warning("Rate limit for %s (status=429), enabling cooldown", url)
+                return None
             # 4xx is usually a permanent error (bad symbol/params), so retrying only adds latency.
             if status_code is not None and 400 <= status_code < 500:
                 logger.warning(
@@ -277,6 +299,8 @@ async def _fetch_yahoo_chart_rows(
     *,
     range_key: str,
 ) -> tuple[list[tuple[str, float]], str | None]:
+    if _provider_on_cooldown("yfinance"):
+        return [], "rate_limited_cooldown"
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
     response = await _request_with_retries(client, url, {"interval": "1d", "range": range_key}, retries=1)
     if response is None:
@@ -374,9 +398,10 @@ def _log_ticker_result(
     latency_ms: float,
     error_reason: str | None,
     fallback_chain: list[str] | None = None,
+    planned_chain: list[str] | None = None,
 ) -> None:
     logger.info(
-        "price_fetch ticker=%s symbol=%s provider=%s status=%s source=%s latency_ms=%.1f error_reason=%s fallback_chain=%s",
+        "price_fetch ticker=%s symbol=%s provider=%s status=%s source=%s latency_ms=%.1f error_reason=%s planned_chain=%s attempted_chain=%s",
         config.id,
         config.symbol,
         provider or "none",
@@ -384,6 +409,7 @@ def _log_ticker_result(
         source or "none",
         latency_ms,
         error_reason or "none",
+        ",".join(planned_chain or []),
         ",".join(fallback_chain or []),
     )
 
@@ -477,23 +503,38 @@ async def _ensure_latest(
 
 
 async def get_prices_payload(*, bypass_cache: bool = False) -> PricesResponse:
+    settings = get_settings()
+    if not bypass_cache:
+        now = datetime.utcnow()
+        async with _prices_cache_lock:
+            cached_payload = _prices_cache.get("payload")
+            cached_at = _prices_cache.get("fetched_at")
+            cache_ttl = timedelta(seconds=settings.cache_ttl_prices)
+            if isinstance(cached_at, datetime) and cached_payload and now - cached_at < cache_ttl:
+                logger.info("Prices cache hit (age=%.1fs)", (now - cached_at).total_seconds())
+                return cached_payload
+
+    async with _prices_refresh_lock:
+        global _prices_refresh_task
+        if _prices_refresh_task is None or _prices_refresh_task.done():
+            _prices_refresh_task = asyncio.create_task(_refresh_prices_payload(bypass_cache=bypass_cache))
+        refresh_task = _prices_refresh_task
+
+    try:
+        return await asyncio.wait_for(refresh_task, timeout=2.2)
+    except asyncio.TimeoutError:
+        logger.warning("Shared prices refresh timed out; serving stale snapshot")
+        return await _build_prices_snapshot(error_reason="refresh_timeout")
+
+
+async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesResponse:
     store = await _get_store()
     configs = list(PRICE_TICKERS)
     now = datetime.utcnow()
     start_time = datetime.utcnow()
     settings = get_settings()
-    cache_ttl = timedelta(seconds=settings.cache_ttl_prices)
     effective_timeout = min(settings.price_fetch_timeout_seconds, 1.8)
     cache_hit = False
-
-    if not bypass_cache:
-        async with _prices_cache_lock:
-            cached_payload = _prices_cache.get("payload")
-            cached_at = _prices_cache.get("fetched_at")
-            if isinstance(cached_at, datetime) and cached_payload and now - cached_at < cache_ttl:
-                cache_hit = True
-                logger.info("Prices cache hit (age=%.1fs)", (now - cached_at).total_seconds())
-                return cached_payload
     logger.info("Prices cache miss (bypass=%s)", bypass_cache)
 
     errors: dict[str, str] = {}
@@ -541,6 +582,11 @@ async def get_prices_payload(*, bypass_cache: bool = False) -> PricesResponse:
             ticker["fetch_latency_ms"] = round(latency_ms, 2)
             ticker["age_seconds"] = _age_seconds(ticker.get("last_updated"))
             ticker["freshness_seconds"] = int(LATEST_TTL.total_seconds())
+            plan = get_provider_plan(config.id)
+            planned_chain = [
+                f"{item.provider}:{item.symbol}"
+                for item in (plan.latest_chain if plan else ())
+            ]
             _log_ticker_result(
                 config=config,
                 provider=ticker.get("provider") or ticker.get("source"),
@@ -549,6 +595,7 @@ async def get_prices_payload(*, bypass_cache: bool = False) -> PricesResponse:
                 latency_ms=latency_ms,
                 error_reason=ticker.get("error_reason") or ticker.get("error"),
                 fallback_chain=list(ticker.get("tried_sources") or []),
+                planned_chain=planned_chain,
             )
             return config.id, ticker
 
@@ -609,6 +656,9 @@ async def get_prices_payload(*, bypass_cache: bool = False) -> PricesResponse:
             "error": sum(1 for t in tickers if t.get("status") == "error"),
             "empty": sum(1 for t in tickers if t.get("status") == "empty"),
             "unsupported": sum(1 for t in tickers if t.get("status") == "unsupported"),
+            "ok_live": sum(1 for t in tickers if t.get("status") == "live"),
+            "ok_cached": sum(1 for t in tickers if t.get("status") == "cached"),
+            "stale_db": sum(1 for t in tickers if t.get("status") == "stale"),
         },
     )
     duration_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
@@ -856,6 +906,47 @@ async def _build_cached_payload(
         error=error or ("No cached price data" if not cached else None),
         error_reason="fallback_db" if cached else "no_cached_price",
         tried_sources=[],
+    )
+
+
+async def _build_prices_snapshot(error_reason: str | None = None) -> PricesResponse:
+    store = await _get_store()
+    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    settings = get_settings()
+    tickers: list[dict] = []
+    errors: dict[str, str] = {}
+    for config in PRICE_TICKERS:
+        ticker = await _build_cached_payload(
+            config,
+            store,
+            error=error_reason,
+            allow_seed=settings.allow_seed_prices,
+        )
+        if error_reason and ticker.get("status") == "empty":
+            ticker["error_reason"] = error_reason
+            ticker["error"] = error_reason
+        tickers.append(ticker)
+        if ticker.get("status") in {"error", "empty", "unsupported"}:
+            errors[str(ticker.get("id"))] = str(ticker.get("error_reason") or ticker.get("error") or "error")
+    summary = {
+        "live": sum(1 for t in tickers if t.get("status") == "live"),
+        "cache": sum(1 for t in tickers if t.get("status") == "cached"),
+        "stale": sum(1 for t in tickers if t.get("status") == "stale"),
+        "seed": sum(1 for t in tickers if t.get("status") == "seed"),
+        "ok_live": sum(1 for t in tickers if t.get("status") == "live"),
+        "ok_cached": sum(1 for t in tickers if t.get("status") == "cached"),
+        "stale_db": sum(1 for t in tickers if t.get("status") == "stale"),
+        "empty": sum(1 for t in tickers if t.get("status") == "empty"),
+        "error": sum(1 for t in tickers if t.get("status") in {"error", "unsupported"}),
+        "unsupported": sum(1 for t in tickers if t.get("status") == "unsupported"),
+    }
+    return PricesResponse(
+        as_of=now,
+        tickers=tickers,
+        errors=errors,
+        timed_out=True if error_reason else False,
+        cache_bypassed=False,
+        summary=summary,
     )
 
 
