@@ -18,55 +18,91 @@ class InstrumentProviderPlan:
 PROVIDER_MAP: dict[str, InstrumentProviderPlan] = {
     "sp500": InstrumentProviderPlan(
         latest_chain=(
+            ProviderAttempt("stooq", "spy.us"),
             ProviderAttempt("yfinance", "^GSPC"),
             ProviderAttempt("yfinance", "SPY"),
-            ProviderAttempt("stooq", "spy.us"),
         ),
         history_chain=(
+            ProviderAttempt("stooq", "spy.us"),
             ProviderAttempt("yfinance", "^GSPC"),
             ProviderAttempt("yfinance", "SPY"),
-            ProviderAttempt("stooq", "spy.us"),
         ),
     ),
     "nas100": InstrumentProviderPlan(
         latest_chain=(
+            ProviderAttempt("stooq", "qqq.us"),
             ProviderAttempt("yfinance", "^NDX"),
             ProviderAttempt("yfinance", "QQQ"),
-            ProviderAttempt("stooq", "qqq.us"),
         ),
         history_chain=(
+            ProviderAttempt("stooq", "qqq.us"),
             ProviderAttempt("yfinance", "^NDX"),
             ProviderAttempt("yfinance", "QQQ"),
-            ProviderAttempt("stooq", "qqq.us"),
         ),
     ),
     "nqmini": InstrumentProviderPlan(
         latest_chain=(
             ProviderAttempt("yfinance", "MNQ=F"),
             ProviderAttempt("yfinance", "NQ=F"),
+            ProviderAttempt("stooq", "qqq.us"),
             ProviderAttempt("stooq", "ndx.us"),
         ),
         history_chain=(
             ProviderAttempt("yfinance", "MNQ=F"),
             ProviderAttempt("yfinance", "NQ=F"),
+            ProviderAttempt("stooq", "qqq.us"),
             ProviderAttempt("stooq", "ndx.us"),
         ),
     ),
     "eurusd": InstrumentProviderPlan(
-        latest_chain=(ProviderAttempt("stooq", "eurusd"), ProviderAttempt("yfinance", "EURUSD=X")),
-        history_chain=(ProviderAttempt("stooq", "eurusd"), ProviderAttempt("yfinance", "EURUSD=X")),
+        latest_chain=(
+            ProviderAttempt("stooq", "eurusd"),
+            ProviderAttempt("stooq", "eurusd.f"),
+            ProviderAttempt("yfinance", "EURUSD=X"),
+        ),
+        history_chain=(
+            ProviderAttempt("stooq", "eurusd"),
+            ProviderAttempt("stooq", "eurusd.f"),
+            ProviderAttempt("yfinance", "EURUSD=X"),
+        ),
     ),
     "gbpusd": InstrumentProviderPlan(
-        latest_chain=(ProviderAttempt("stooq", "gbpusd"), ProviderAttempt("yfinance", "GBPUSD=X")),
-        history_chain=(ProviderAttempt("stooq", "gbpusd"), ProviderAttempt("yfinance", "GBPUSD=X")),
+        latest_chain=(
+            ProviderAttempt("stooq", "gbpusd"),
+            ProviderAttempt("stooq", "gbpusd.f"),
+            ProviderAttempt("yfinance", "GBPUSD=X"),
+        ),
+        history_chain=(
+            ProviderAttempt("stooq", "gbpusd"),
+            ProviderAttempt("stooq", "gbpusd.f"),
+            ProviderAttempt("yfinance", "GBPUSD=X"),
+        ),
     ),
     "gbpjpy": InstrumentProviderPlan(
-        latest_chain=(ProviderAttempt("stooq", "gbpjpy"), ProviderAttempt("yfinance", "GBPJPY=X")),
-        history_chain=(ProviderAttempt("stooq", "gbpjpy"), ProviderAttempt("yfinance", "GBPJPY=X")),
+        latest_chain=(
+            ProviderAttempt("stooq", "gbpjpy"),
+            ProviderAttempt("stooq", "gbpjpy.f"),
+            ProviderAttempt("yfinance", "GBPJPY=X"),
+        ),
+        history_chain=(
+            ProviderAttempt("stooq", "gbpjpy"),
+            ProviderAttempt("stooq", "gbpjpy.f"),
+            ProviderAttempt("yfinance", "GBPJPY=X"),
+        ),
     ),
     "xauusd": InstrumentProviderPlan(
-        latest_chain=(ProviderAttempt("yfinance", "GC=F"), ProviderAttempt("stooq", "xauusd")),
-        history_chain=(ProviderAttempt("yfinance", "GC=F"), ProviderAttempt("stooq", "xauusd")),
+        latest_chain=(
+            ProviderAttempt("stooq", "xauusd"),
+            ProviderAttempt("stooq", "xauusd.f"),
+            ProviderAttempt("yfinance", "XAUUSD=X"),
+            ProviderAttempt("yfinance", "GC=F"),
+        ),
+        history_chain=(
+            ProviderAttempt("stooq", "xauusd"),
+            ProviderAttempt("stooq", "xauusd.f"),
+            ProviderAttempt("yfinance", "XAUUSD=X"),
+            ProviderAttempt("yfinance", "GC=F"),
+        ),
     ),
 }
 

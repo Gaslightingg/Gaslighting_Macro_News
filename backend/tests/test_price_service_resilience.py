@@ -145,7 +145,7 @@ async def test_cached_value_marked_stale_when_old(monkeypatch):
         return None, "provider_error"
 
     async def no_yf(*_args, **_kwargs):
-        return None
+        return None, "yfinance_failed"
 
     monkeypatch.setattr(price_service, "_fetch_stooq_latest", no_stooq)
     monkeypatch.setattr(price_service, "_fetch_yfinance_latest", no_yf)
@@ -301,7 +301,7 @@ async def test_yfinance_failure_uses_stooq_fallback_chain(monkeypatch):
     calls: list[str] = []
 
     async def no_yf(*_args, **_kwargs):
-        return None
+        return None, "yfinance_failed"
 
     async def stooq_ok(_client, symbol):
         calls.append(symbol)
@@ -541,7 +541,7 @@ async def test_yahoo_429_sets_cooldown_and_fallback_does_not_crash(monkeypatch):
 
     async def rate_limited(*_args, **_kwargs):
         price_service._set_provider_cooldown("yfinance", seconds=60)
-        return None
+        return None, "rate_limited_cooldown"
 
     async def stooq_ok(*_args, **_kwargs):
         return 5000.0, 0.7, "2026-01-01"
@@ -564,7 +564,7 @@ async def test_stooq_malformed_rows_become_parse_error_without_crash(monkeypatch
         return None, "stooq_missing_columns"
 
     async def no_yf(*_args, **_kwargs):
-        return None
+        return None, "yfinance_failed"
 
     monkeypatch.setattr(price_service, "_fetch_stooq_latest", malformed_stooq)
     monkeypatch.setattr(price_service, "_fetch_yfinance_latest", no_yf)
@@ -626,3 +626,79 @@ async def test_db_locked_during_persistence_does_not_break_prices_payload(monkey
     assert len(payload.tickers) == 1
     assert payload.tickers[0].status == "live"
     assert store.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_successful_live_fx_fetch(monkeypatch):
+    cfg = PriceConfig("eurusd", "EUR/USD", "EUR/USD", "fx", "USD", "", (), "EURUSD=X")
+    store = _FakeStore()
+
+    async def stooq_ok(*_args, **_kwargs):
+        return 1.095, 0.12, "2026-01-01"
+
+    monkeypatch.setattr(price_service, "_fetch_stooq_latest", stooq_ok)
+    latest = await price_service._ensure_latest(store, client=None, config=cfg, timeout_seconds=0.1)  # type: ignore[arg-type]
+    assert latest is not None
+    assert latest["status"] == "live"
+    assert latest["source"] == "stooq"
+    assert isinstance(latest["value"], float)
+
+
+@pytest.mark.asyncio
+async def test_successful_live_index_fetch(monkeypatch):
+    cfg = PriceConfig("sp500", "S&P500", "S&P 500", "index", "pts", "", (), "^GSPC")
+    store = _FakeStore()
+
+    async def stooq_ok(*_args, **_kwargs):
+        return 5123.2, 0.34, "2026-01-01"
+
+    monkeypatch.setattr(price_service, "_fetch_stooq_latest", stooq_ok)
+    latest = await price_service._ensure_latest(store, client=None, config=cfg, timeout_seconds=0.1)  # type: ignore[arg-type]
+    assert latest is not None
+    assert latest["status"] == "live"
+    assert latest["source"] == "stooq"
+
+
+@pytest.mark.asyncio
+async def test_stale_db_fallback_when_live_providers_fail(monkeypatch):
+    cfg = PriceConfig("gbpusd", "GBP/USD", "GBP/USD", "fx", "USD", "", (), "GBPUSD=X")
+    store = _FakeStore()
+    store.latest[cfg.id] = {
+        "value": 1.27,
+        "change": 0.1,
+        "change_pct": 0.1,
+        "last_updated": "2026-01-01",
+        "source": "db",
+    }
+    store.meta[f"latest:{cfg.id}:updated_at"] = (datetime.utcnow() - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    async def stooq_fail(*_args, **_kwargs):
+        return None, "stooq_request_failed"
+
+    async def yf_fail(*_args, **_kwargs):
+        return None, "rate_limited_cooldown"
+
+    monkeypatch.setattr(price_service, "_fetch_stooq_latest", stooq_fail)
+    monkeypatch.setattr(price_service, "_fetch_yfinance_latest", yf_fail)
+    latest = await price_service._ensure_latest(store, client=None, config=cfg, timeout_seconds=0.1)  # type: ignore[arg-type]
+    assert latest is not None
+    assert latest["status"] == "stale"
+    assert latest["error_reason"] in {"stooq_request_failed", "rate_limited_cooldown"}
+
+
+@pytest.mark.asyncio
+async def test_empty_no_cache_case_when_all_live_providers_fail(monkeypatch):
+    cfg = PriceConfig("nas100", "NAS100", "Nasdaq 100", "index", "pts", "", (), "^NDX")
+    store = _FakeStore()
+
+    async def stooq_fail(*_args, **_kwargs):
+        return None, "stooq_missing_columns"
+
+    async def yf_fail(*_args, **_kwargs):
+        return None, "rate_limited_cooldown"
+
+    monkeypatch.setattr(price_service, "_fetch_stooq_latest", stooq_fail)
+    monkeypatch.setattr(price_service, "_fetch_yfinance_latest", yf_fail)
+    latest = await price_service._ensure_latest(store, client=None, config=cfg, timeout_seconds=0.1)  # type: ignore[arg-type]
+    assert latest is not None
+    assert latest["status"] == "error"

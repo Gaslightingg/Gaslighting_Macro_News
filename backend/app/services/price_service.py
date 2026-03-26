@@ -64,6 +64,10 @@ _store_cache_lock = asyncio.Lock()
 _seed_cache: dict[str, dict[str, object]] | None = None
 
 
+def _yfinance_symbol_key(symbol: str) -> str:
+    return f"yfinance:{symbol.upper()}"
+
+
 def _load_seed_prices() -> dict[str, dict[str, object]]:
     global _seed_cache
     if _seed_cache is not None:
@@ -272,7 +276,9 @@ async def _request_with_retries(
             status_code = exc.response.status_code if exc.response is not None else None
             if status_code == 429:
                 if "query1.finance.yahoo.com" in url:
-                    _set_provider_cooldown("yfinance", seconds=60)
+                    symbol = url.rstrip("/").split("/")[-1]
+                    _set_provider_cooldown(_yfinance_symbol_key(symbol), seconds=45)
+                    _set_provider_cooldown("yfinance", seconds=8)
                 logger.warning("Rate limit for %s (status=429), enabling cooldown", url)
                 return None
             # 4xx is usually a permanent error (bad symbol/params), so retrying only adds latency.
@@ -415,12 +421,19 @@ async def _fetch_yahoo_chart_rows(
     *,
     range_key: str,
 ) -> tuple[list[tuple[str, float]], str | None]:
-    if _provider_on_cooldown("yfinance"):
+    if _provider_on_cooldown("yfinance") or _provider_on_cooldown(_yfinance_symbol_key(symbol)):
         return [], "rate_limited_cooldown"
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-    response = await _request_with_retries(client, url, {"interval": "1d", "range": range_key}, retries=1)
+    response = None
+    last_error = "provider_error"
+    for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+        url = f"https://{host}/v8/finance/chart/{symbol}"
+        response = await _request_with_retries(client, url, {"interval": "1d", "range": range_key}, retries=1)
+        if response is not None:
+            break
+        if _provider_on_cooldown(_yfinance_symbol_key(symbol)):
+            last_error = "rate_limited_cooldown"
     if response is None:
-        return [], "provider_error"
+        return [], last_error
     try:
         payload = response.json()
     except ValueError:
@@ -451,16 +464,18 @@ async def _fetch_yfinance_latest(
     client: httpx.AsyncClient,
     symbol: str,
     timeout_seconds: float,
-) -> tuple[float, float, str] | None:
-    points, _error = await _fetch_yahoo_chart_rows(client, symbol, range_key="5d")
+) -> tuple[tuple[float, float, str] | None, str | None]:
+    points, error = await _fetch_yahoo_chart_rows(client, symbol, range_key="5d")
+    if error is not None:
+        return None, error
     if len(points) < 2:
-        return None
+        return None, "yfinance_no_data"
     latest_date, latest_close = points[-1]
     _prev_date, prev_close = points[-2]
     if prev_close == 0:
-        return None
+        return None, "yfinance_no_data"
     change_pct = ((latest_close - prev_close) / prev_close) * 100
-    return latest_close, round(change_pct, 2), latest_date
+    return (latest_close, round(change_pct, 2), latest_date), None
 
 
 async def _fetch_yfinance_history(
@@ -619,8 +634,9 @@ async def _ensure_latest(
         if attempt.provider == "stooq":
             latest, current_error = await _fetch_stooq_latest(client, attempt.symbol)
         elif attempt.provider == "yfinance":
-            latest = await _fetch_yfinance_latest(client, attempt.symbol, timeout_seconds=timeout_seconds)
-            current_error = None if latest else "yfinance_failed"
+            latest, current_error = await _fetch_yfinance_latest(client, attempt.symbol, timeout_seconds=timeout_seconds)
+            if latest is None and current_error is None:
+                current_error = "yfinance_failed"
         latency_ms = (perf_counter() - started) * 1000
         if latest:
             value, change_pct, date = latest
