@@ -383,3 +383,36 @@ async def test_follower_near_timeout_boundary_gets_fresh(monkeypatch):
 
     result = await price_service.get_prices_payload(bypass_cache=True, request_id="b1")
     assert result.timed_out is False
+
+
+@pytest.mark.asyncio
+async def test_owner_and_follower_return_fresh_without_timeout_fallback(monkeypatch, caplog):
+    async def refresh(*_args, **_kwargs):
+        await asyncio.sleep(0.03)
+        return PricesResponse(as_of="2026-01-01T00:00:00Z", tickers=[], errors={}, timed_out=False, summary={})
+
+    monkeypatch.setattr(price_service, "_refresh_prices_payload", refresh)
+    monkeypatch.setattr(price_service, "SHARED_WAITER_TIMEOUT_SECONDS", 0.2)
+    price_service._prices_refresh_task = None
+    price_service._prices_cache["payload"] = None
+    price_service._prices_cache["fetched_at"] = None
+    caplog.set_level("INFO")
+
+    async def owner_call():
+        return await price_service.get_prices_payload(bypass_cache=True, request_id="owner-rid")
+
+    async def follower_call():
+        await asyncio.sleep(0.005)
+        return await price_service.get_prices_payload(bypass_cache=True, request_id="follower-rid")
+
+    owner_payload, follower_payload = await asyncio.gather(owner_call(), follower_call())
+    assert owner_payload.timed_out is False
+    assert follower_payload.timed_out is False
+
+    assert "owner_path_entered rid=owner-rid" in caplog.text
+    assert "owner_path_returning_fresh rid=owner-rid" in caplog.text
+    assert "follower_path_entered rid=follower-rid" in caplog.text
+    assert "follower_path_returning_fresh rid=follower-rid" in caplog.text
+    assert "timeout_branch_entered rid=owner-rid" not in caplog.text
+    assert "timeout_branch_entered rid=follower-rid" not in caplog.text
+    assert "Shared prices refresh timed out; serving stale snapshot" not in caplog.text

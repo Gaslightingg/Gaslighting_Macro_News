@@ -614,45 +614,99 @@ async def get_prices_payload(*, bypass_cache: bool = False, request_id: str | No
                 refresh_task.cancelled(),
             )
 
+    def _read_fresh_done_task(task: asyncio.Task) -> PricesResponse | None:
+        if not task.done() or task.cancelled():
+            return None
+        exc = task.exception()
+        if exc is not None:
+            raise exc
+        return task.result()
+
     waiter_started = perf_counter()
     waiter_deadline = waiter_started + SHARED_WAITER_TIMEOUT_SECONDS
     waiter_seen_snapshot_version = _cache_snapshot_version
-    logger.info(
-        "waiter_started rid=%s inflight_owner_rid=%s waiter_deadline_at=%.6f wait_started_on_task_done=%s cache_snapshot_version=%s",
-        _price_request_id.get(),
-        _inflight_owner_rid or "none",
-        waiter_deadline,
-        refresh_task.done(),
-        waiter_seen_snapshot_version,
-    )
+    if created:
+        logger.info(
+            "owner_path_entered rid=%s inflight_owner_rid=%s wait_started_on_task_done=%s cache_snapshot_version=%s",
+            _price_request_id.get(),
+            _inflight_owner_rid or "none",
+            refresh_task.done(),
+            waiter_seen_snapshot_version,
+        )
+    else:
+        logger.info(
+            "follower_path_entered rid=%s inflight_owner_rid=%s waiter_deadline_at=%.6f wait_started_on_task_done=%s cache_snapshot_version=%s",
+            _price_request_id.get(),
+            _inflight_owner_rid or "none",
+            waiter_deadline,
+            refresh_task.done(),
+            waiter_seen_snapshot_version,
+        )
     try:
-        if refresh_task.done() and not refresh_task.cancelled():
-            payload = refresh_task.result()
+        payload = _read_fresh_done_task(refresh_task)
+        if payload is not None:
+            logger.info(
+                "%s rid=%s inflight_owner_rid=%s",
+                "owner_path_returning_fresh" if created else "follower_path_returning_fresh",
+                _price_request_id.get(),
+                _inflight_owner_rid or "none",
+            )
         else:
-            remaining = max(0.0, waiter_deadline - perf_counter())
-            payload = await asyncio.wait_for(asyncio.shield(refresh_task), timeout=remaining)
+            if created:
+                payload = await asyncio.shield(refresh_task)
+                logger.info(
+                    "owner_path_returning_fresh rid=%s inflight_owner_rid=%s",
+                    _price_request_id.get(),
+                    _inflight_owner_rid or "none",
+                )
+            else:
+                remaining = max(0.0, waiter_deadline - perf_counter())
+                payload = await asyncio.wait_for(asyncio.shield(refresh_task), timeout=remaining)
+                logger.info(
+                    "follower_path_returning_fresh rid=%s inflight_owner_rid=%s",
+                    _price_request_id.get(),
+                    _inflight_owner_rid or "none",
+                )
         if payload is None:
             logger.error("Prices refresh returned None; using controlled snapshot")
             payload = await _build_prices_snapshot(error_reason="refresh_none")
+            if payload is None:
+                return await _build_empty_prices_response("refresh_none_no_snapshot")
         return payload
     except asyncio.TimeoutError:
         waiter_elapsed_ms = (perf_counter() - waiter_started) * 1000
-        if refresh_task.done() and not refresh_task.cancelled():
-            try:
-                payload = refresh_task.result()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("inflight_task_done_after_timeout but result failed: %s", exc)
-            else:
-                if payload is not None:
-                    logger.info(
-                        "follower_received_fresh_snapshot=true rid=%s inflight_owner_rid=%s waiter_timeout_ms=%.1f task_done_at=%s task_result_read_at=%s",
-                        _price_request_id.get(),
-                        _inflight_owner_rid or "none",
-                        waiter_elapsed_ms,
-                        _inflight_task_done_at.isoformat() if _inflight_task_done_at else "none",
-                        datetime.utcnow().isoformat(),
-                    )
-                    return payload
+        if _price_request_id.get() == (_inflight_owner_rid or "") and _inflight_task_result_published_at is not None:
+            logger.error(
+                "invariant_violation_owner_timeout_after_publish rid=%s published_at=%s",
+                _price_request_id.get(),
+                _inflight_task_result_published_at.isoformat(),
+            )
+        logger.warning(
+            "timeout_branch_entered rid=%s inflight_owner_rid=%s waiter_timeout_ms=%.1f",
+            _price_request_id.get(),
+            _inflight_owner_rid or "none",
+            waiter_elapsed_ms,
+        )
+        try:
+            payload = _read_fresh_done_task(refresh_task)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("inflight_task_done_after_timeout but result failed: %s", exc)
+        else:
+            if payload is not None:
+                logger.info(
+                    "timeout_branch_skipped_due_to_task_done rid=%s inflight_owner_rid=%s waiter_timeout_ms=%.1f task_done_at=%s task_result_read_at=%s",
+                    _price_request_id.get(),
+                    _inflight_owner_rid or "none",
+                    waiter_elapsed_ms,
+                    _inflight_task_done_at.isoformat() if _inflight_task_done_at else "none",
+                    datetime.utcnow().isoformat(),
+                )
+                logger.info(
+                    "follower_path_returning_fresh rid=%s inflight_owner_rid=%s",
+                    _price_request_id.get(),
+                    _inflight_owner_rid or "none",
+                )
+                return payload
         async with _prices_cache_lock:
             cached_payload = _prices_cache.get("payload")
             cached_at = _prices_cache.get("fetched_at")
