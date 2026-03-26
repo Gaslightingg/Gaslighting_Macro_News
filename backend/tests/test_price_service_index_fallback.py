@@ -35,7 +35,7 @@ async def test_index_uses_stooq_fallback_symbol(monkeypatch):
 
     monkeypatch.setattr(price_service, "_fetch_stooq_latest", fake_fetch_latest)
 
-    payload = await price_service._ensure_latest(FakeStore(), client=None, config=config)
+    payload = await price_service._ensure_latest(FakeStore(), client=None, config=config, timeout_seconds=0.5)
 
     assert payload is not None
     assert payload["source"] == "stooq"

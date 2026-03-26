@@ -7,10 +7,18 @@ import logging
 from io import StringIO
 import json
 from pathlib import Path
+from time import perf_counter
 
 import httpx
 
-from ..models.schemas import PriceHistoryMeta, PriceHistoryPoint, PriceHistoryResponse, PricesResponse
+from ..models.schemas import (
+    PriceHistoryMeta,
+    PriceHistoryPoint,
+    PriceHistoryResponse,
+    PriceProviderHealthItem,
+    PriceProviderHealthResponse,
+    PricesResponse,
+)
 from ..providers.price_normalizer import normalize_price_ticker
 from ..services.price_catalog import PRICE_TICKERS, PriceConfig, resolve_price_config
 from ..services.symbols import get_symbol_mapping
@@ -327,6 +335,7 @@ def _resolve_symbols(config: PriceConfig) -> dict[str, str | None]:
     mapping = get_symbol_mapping(config.id)
     return {
         "stooq": mapping.get("stooq") or None,
+        "stooq_fallbacks": tuple(mapping.get("stooq_fallbacks") or ()),
         "yfinance": mapping.get("yfinance") or None,
     }
 
@@ -340,6 +349,40 @@ def _is_fresh(timestamp: str | None, ttl: timedelta) -> bool:
     except ValueError:
         return False
     return datetime.utcnow() - fetched_at < ttl
+
+
+def _age_seconds(timestamp: str | None) -> int | None:
+    if not timestamp:
+        return None
+    try:
+        parsed = datetime.strptime(timestamp, "%Y-%m-%d")
+    except ValueError:
+        try:
+            parsed = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            return None
+    return max(0, int((datetime.utcnow() - parsed).total_seconds()))
+
+
+def _log_ticker_result(
+    *,
+    config: PriceConfig,
+    provider: str | None,
+    status: str,
+    source: str | None,
+    latency_ms: float,
+    error_reason: str | None,
+) -> None:
+    logger.info(
+        "price_fetch ticker=%s symbol=%s provider=%s status=%s source=%s latency_ms=%.1f error_reason=%s",
+        config.id,
+        config.symbol,
+        provider or "none",
+        status,
+        source or "none",
+        latency_ms,
+        error_reason or "none",
+    )
 
 
 async def _ensure_history(
@@ -394,9 +437,11 @@ async def _ensure_latest(
     tried_sources: list[str] = []
     error_reason: str | None = None
 
-    if symbols.get("stooq"):
-        tried_sources.append("stooq")
-        latest, stooq_error = await _fetch_stooq_latest(client, symbols["stooq"])
+    stooq_candidates = [symbols.get("stooq"), *(symbols.get("stooq_fallbacks") or ())]
+    stooq_candidates = [symbol for symbol in stooq_candidates if symbol]
+    for candidate in stooq_candidates:
+        tried_sources.append(f"stooq:{candidate}")
+        latest, stooq_error = await _fetch_stooq_latest(client, candidate)
         if latest:
             value, change_pct, date = latest
             payload = {
@@ -405,6 +450,7 @@ async def _ensure_latest(
                 "change_pct": change_pct,
                 "last_updated": date,
                 "source": "stooq",
+                "provider": "stooq",
                 "status": "live",
                 "quality": "high",
                 "tried_sources": tried_sources,
@@ -415,7 +461,7 @@ async def _ensure_latest(
         error_reason = stooq_error or "stooq_failed"
 
     if symbols.get("yfinance"):
-        tried_sources.append("yfinance")
+        tried_sources.append(f"yfinance:{symbols['yfinance']}")
         latest = await _fetch_yfinance_latest(
             symbols["yfinance"],
             timeout_seconds=timeout_seconds,
@@ -428,6 +474,7 @@ async def _ensure_latest(
                 "change_pct": change_pct,
                 "last_updated": date,
                 "source": "yfinance",
+                "provider": "yfinance",
                 "status": "live",
                 "quality": "high",
                 "tried_sources": tried_sources,
@@ -444,14 +491,16 @@ async def _ensure_latest(
         cached["status"] = "stale"
         cached["quality"] = "low"
         cached["source"] = cached.get("source") or "db"
+        cached["provider"] = cached.get("provider") or cached.get("source")
         cached["tried_sources"] = tried_sources
         cached["error_reason"] = error_reason
         return cached
     return {"status": "error", "error_reason": error_reason, "tried_sources": tried_sources}
 
 
-async def get_prices_payload() -> PricesResponse:
+async def get_prices_payload(*, bypass_cache: bool = False) -> PricesResponse:
     store = await _get_store()
+    configs = list(PRICE_TICKERS)
     now = datetime.utcnow()
     start_time = datetime.utcnow()
     settings = get_settings()
@@ -459,14 +508,15 @@ async def get_prices_payload() -> PricesResponse:
     effective_timeout = min(settings.price_fetch_timeout_seconds, 6.0)
     cache_hit = False
 
-    async with _prices_cache_lock:
-        cached_payload = _prices_cache.get("payload")
-        cached_at = _prices_cache.get("fetched_at")
-        if isinstance(cached_at, datetime) and cached_payload and now - cached_at < cache_ttl:
-            cache_hit = True
-            logger.info("Prices cache hit (age=%.1fs)", (now - cached_at).total_seconds())
-            return cached_payload
-    logger.info("Prices cache miss")
+    if not bypass_cache:
+        async with _prices_cache_lock:
+            cached_payload = _prices_cache.get("payload")
+            cached_at = _prices_cache.get("fetched_at")
+            if isinstance(cached_at, datetime) and cached_payload and now - cached_at < cache_ttl:
+                cache_hit = True
+                logger.info("Prices cache hit (age=%.1fs)", (now - cached_at).total_seconds())
+                return cached_payload
+    logger.info("Prices cache miss (bypass=%s)", bypass_cache)
 
     errors: dict[str, str] = {}
     timed_out = False
@@ -476,42 +526,89 @@ async def get_prices_payload() -> PricesResponse:
     )
     async with httpx.AsyncClient(timeout=http_timeout) as client:
         semaphore = asyncio.Semaphore(settings.price_fetch_concurrency)
-        tasks: dict[asyncio.Task, PriceConfig] = {}
-        for config in PRICE_TICKERS:
-            task = asyncio.create_task(
-                _build_ticker_payload(config, store, client, semaphore, timeout_seconds=effective_timeout)
-            )
-            tasks[task] = config
-        done, pending = await asyncio.wait(tasks.keys(), timeout=effective_timeout)
         ticker_by_id: dict[str, dict] = {}
-        for task in done:
-            config = tasks[task]
+
+        async def run_for_ticker(config: PriceConfig) -> tuple[str, dict]:
+            started = perf_counter()
             try:
-                ticker = task.result()
+                ticker = await asyncio.wait_for(
+                    _build_ticker_payload(
+                        config,
+                        store,
+                        client,
+                        semaphore,
+                        timeout_seconds=effective_timeout,
+                        allow_seed=settings.allow_seed_prices,
+                    ),
+                    timeout=effective_timeout,
+                )
+            except asyncio.TimeoutError:
+                nonlocal timed_out
+                timed_out = True
+                ticker = await _build_cached_payload(
+                    config,
+                    store,
+                    error="timeout",
+                    allow_seed=settings.allow_seed_prices,
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Ticker fetch failed for %s: %s", config.id, exc)
-                ticker = await _build_cached_payload(config, store, error=str(exc))
-            if ticker.get("error"):
-                errors[config.id] = ticker["error"]
-            ticker_by_id[config.id] = ticker
-        if pending:
-            timed_out = True
-            logger.warning("Price fetch timed out for %s tickers", len(pending))
-            for task in pending:
-                task.cancel()
-                config = tasks[task]
-                ticker = await _build_cached_payload(config, store, error="timeout")
-                if ticker.get("error"):
-                    errors[config.id] = ticker["error"]
-                ticker_by_id[config.id] = ticker
+                ticker = await _build_cached_payload(
+                    config,
+                    store,
+                    error=f"provider_error:{exc}",
+                    allow_seed=settings.allow_seed_prices,
+                )
+            latency_ms = (perf_counter() - started) * 1000
+            ticker["fetch_latency_ms"] = round(latency_ms, 2)
+            ticker["age_seconds"] = _age_seconds(ticker.get("last_updated"))
+            ticker["freshness_seconds"] = int(LATEST_TTL.total_seconds())
+            _log_ticker_result(
+                config=config,
+                provider=ticker.get("provider") or ticker.get("source"),
+                status=str(ticker.get("status") or "unknown"),
+                source=ticker.get("source"),
+                latency_ms=latency_ms,
+                error_reason=ticker.get("error_reason") or ticker.get("error"),
+            )
+            return config.id, ticker
 
-    tickers = [ticker_by_id.get(config.id) for config in PRICE_TICKERS if ticker_by_id.get(config.id)]
+        results = await asyncio.gather(*(run_for_ticker(config) for config in configs), return_exceptions=True)
+        for idx, result in enumerate(results):
+            config = configs[idx]
+            if isinstance(result, Exception):
+                logger.warning("Ticker task failed for %s: %s", config.id, result)
+                ticker = await _build_cached_payload(
+                    config,
+                    store,
+                    error="task_failed",
+                    allow_seed=settings.allow_seed_prices,
+                )
+                ticker["error_reason"] = ticker.get("error_reason") or "task_failed"
+                ticker_by_id[config.id] = ticker
+            else:
+                key, ticker = result
+                ticker_by_id[key] = ticker
+
+    tickers = [ticker_by_id.get(config.id) for config in configs if ticker_by_id.get(config.id)]
+    for ticker in tickers:
+        if ticker.get("error") or ticker.get("status") in {"error", "empty"}:
+            errors[str(ticker.get("id"))] = str(ticker.get("error") or ticker.get("error_reason") or "error")
 
     response = PricesResponse(
         as_of=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         tickers=tickers,
         errors=errors,
         timed_out=timed_out,
+        cache_bypassed=bypass_cache,
+        summary={
+            "live": sum(1 for t in tickers if t.get("status") == "live"),
+            "cache": sum(1 for t in tickers if t.get("status") == "cached"),
+            "stale": sum(1 for t in tickers if t.get("status") == "stale"),
+            "seed": sum(1 for t in tickers if t.get("status") == "seed"),
+            "error": sum(1 for t in tickers if t.get("status") == "error"),
+            "empty": sum(1 for t in tickers if t.get("status") == "empty"),
+        },
     )
     duration_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
     ok_count = sum(1 for ticker in tickers if isinstance(ticker.get("value"), (int, float)))
@@ -529,8 +626,9 @@ async def get_prices_payload() -> PricesResponse:
         cache_hit,
     )
     async with _prices_cache_lock:
-        _prices_cache["payload"] = response
-        _prices_cache["fetched_at"] = now
+        if not bypass_cache:
+            _prices_cache["payload"] = response
+            _prices_cache["fetched_at"] = now
     return response
 
 
@@ -540,9 +638,10 @@ async def _build_ticker_payload(
     client: httpx.AsyncClient,
     semaphore: asyncio.Semaphore,
     timeout_seconds: float,
+    allow_seed: bool,
 ) -> dict:
     async with semaphore:
-        return await _build_ticker_payload_inner(config, store, client, timeout_seconds)
+        return await _build_ticker_payload_inner(config, store, client, timeout_seconds, allow_seed)
 
 
 async def _build_ticker_payload_inner(
@@ -550,6 +649,7 @@ async def _build_ticker_payload_inner(
     store: PriceHistoryStore,
     client: httpx.AsyncClient,
     timeout_seconds: float,
+    allow_seed: bool,
 ) -> dict:
     try:
         latest = await _ensure_latest(store, client, config, timeout_seconds)
@@ -560,7 +660,7 @@ async def _build_ticker_payload_inner(
         history_points = [PriceHistoryPoint(date=p.date, value=p.value) for p in spark_points]
 
         seed = _seed_for_config(config)
-        if latest is None and not history and seed:
+        if latest is None and not history and seed and allow_seed:
             return normalize_price_ticker(
                 {
                     "id": config.id,
@@ -577,6 +677,7 @@ async def _build_ticker_payload_inner(
                 },
                 now=datetime.utcnow(),
                 source="seed",
+                provider="seed",
                 status="seed",
                 error="seeded fallback",
                 error_reason="seed_fallback",
@@ -596,6 +697,7 @@ async def _build_ticker_payload_inner(
                 },
                 now=datetime.utcnow(),
                 source=None,
+                provider=None,
                 status="empty",
                 error="No price data available from stooq/yfinance",
                 error_reason="no_price_data",
@@ -626,6 +728,7 @@ async def _build_ticker_payload_inner(
                     },
                     now=datetime.utcnow(),
                     source="seed",
+                    provider="seed",
                     status="seed",
                     error="seeded fallback",
                     error_reason="seed_fallback",
@@ -660,6 +763,7 @@ async def _build_ticker_payload_inner(
             },
             now=datetime.utcnow(),
             source=resolved_source,
+            provider=(latest or {}).get("provider") if latest else None,
             status=safe_status,
             error=None if safe_status not in {"error", "empty"} else "No price data available",
             error_reason=error_reason,
@@ -667,10 +771,15 @@ async def _build_ticker_payload_inner(
         )
     except Exception as exc:
         logger.exception("Failed to build ticker payload for %s", config.id)
-        return await _build_cached_payload(config, store, error=f"Ticker fetch failed: {exc}")
+        return await _build_cached_payload(config, store, error=f"Ticker fetch failed: {exc}", allow_seed=allow_seed)
 
 
-async def _build_cached_payload(config: PriceConfig, store: PriceHistoryStore, error: str | None = None) -> dict:
+async def _build_cached_payload(
+    config: PriceConfig,
+    store: PriceHistoryStore,
+    error: str | None = None,
+    allow_seed: bool = False,
+) -> dict:
     cached = await store.get_latest(config.id)
     history = await store.get_history(config.id)
     meta = _history_meta(history)
@@ -678,7 +787,7 @@ async def _build_cached_payload(config: PriceConfig, store: PriceHistoryStore, e
     history_points = [PriceHistoryPoint(date=p.date, value=p.value) for p in spark_points]
     if cached is None:
         seed = _seed_for_config(config)
-        if seed:
+        if seed and allow_seed:
             return normalize_price_ticker(
                 {
                     "id": config.id,
@@ -695,6 +804,7 @@ async def _build_cached_payload(config: PriceConfig, store: PriceHistoryStore, e
                 },
                 now=datetime.utcnow(),
                 source="seed",
+                provider="seed",
                 status="seed",
                 error="seeded fallback",
                 error_reason="seed_fallback",
@@ -714,6 +824,7 @@ async def _build_cached_payload(config: PriceConfig, store: PriceHistoryStore, e
             },
             now=datetime.utcnow(),
             source=None,
+            provider=None,
             status="empty",
             error=error or "No cached price data",
             error_reason="no_cached_price",
@@ -735,6 +846,7 @@ async def _build_cached_payload(config: PriceConfig, store: PriceHistoryStore, e
         },
         now=datetime.utcnow(),
         source="db",
+        provider=cached.get("source") if cached else None,
         status="stale" if cached else "empty",
         error=error or ("No cached price data" if not cached else None),
         error_reason="fallback_db" if cached else "no_cached_price",
@@ -783,4 +895,65 @@ async def get_price_history_payload(symbol: str, range_key: str) -> PriceHistory
         quality=quality,
         points=response_points,
         history_meta=meta,
+    )
+
+
+async def get_price_provider_health_payload() -> PriceProviderHealthResponse:
+    settings = get_settings()
+    store = await _get_store()
+    configs = list(PRICE_TICKERS)
+    statuses = {"live": 0, "fallback": 0}
+    instruments: list[PriceProviderHealthItem] = []
+    for config in configs:
+        mapping = _resolve_symbols(config)
+        cached = await store.get_latest(config.id)
+        cache_status = "empty"
+        last_error = None
+        if cached:
+            updated_at = cached.get("last_updated")
+            if _is_fresh(updated_at, LATEST_TTL):
+                cache_status = "cache"
+            else:
+                cache_status = "stale"
+            statuses["fallback"] += 1
+        else:
+            updated_at = None
+
+        age_seconds = _age_seconds(updated_at)
+        has_mapping = bool(mapping.get("stooq") or mapping.get("yfinance"))
+        if not has_mapping:
+            last_error = "invalid_symbol_mapping"
+            cache_status = "error"
+
+        instruments.append(
+            PriceProviderHealthItem(
+                id=config.id,
+                symbol=config.symbol,
+                stooq_symbol=mapping.get("stooq"),
+                yfinance_symbol=mapping.get("yfinance"),
+                has_mapping=has_mapping,
+                cache_status=cache_status,
+                last_updated=updated_at,
+                last_error=last_error,
+                age_seconds=age_seconds,
+            )
+        )
+
+    try:
+        live_payload = await get_prices_payload(bypass_cache=True)
+        statuses["live"] = live_payload.summary.get("live", 0)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Price live diagnostics failed: %s", exc)
+
+    total = max(1, len(configs))
+    live_ratio = statuses["live"] / total
+    overall_status = "ok" if live_ratio >= 0.7 else "degraded" if live_ratio > 0 else "down"
+    if not settings.allow_seed_prices and any(item.cache_status == "seed" for item in instruments):
+        overall_status = "degraded"
+
+    return PriceProviderHealthResponse(
+        as_of=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        overall_status=overall_status,
+        live_ratio=round(live_ratio, 3),
+        instruments=instruments,
     )

@@ -30,6 +30,22 @@ const formatValue = (value, unit) => {
   return unit ? `${value.toFixed(2)} ${unit}` : value.toFixed(2);
 };
 
+const PRICE_STATUS_TEXT = {
+  live: "Live data",
+  cached: "Cached snapshot",
+  stale: "Stale value",
+  seed: "Seed/demo value",
+  error: "Fetch failed",
+  empty: "No data yet",
+};
+
+const describePriceStatus = (ticker) => {
+  const status = ticker?.status ?? "unknown";
+  const label = PRICE_STATUS_TEXT[status] ?? status;
+  const details = ticker?.error_reason || ticker?.error || null;
+  return details ? `${label}: ${details}` : label;
+};
+
 const formatPointDate = (timestamp) => {
   if (!Number.isFinite(timestamp)) return "N/A";
   return new Date(timestamp).toISOString().slice(0, 10);
@@ -1008,6 +1024,11 @@ function App() {
           <div className="meta-chip">Local {now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
           <div className="meta-chip">Refresh {nextRefresh}</div>
           <div className="meta-chip">As of {prices?.as_of ?? "N/A"}</div>
+          {prices?.summary ? (
+            <div className="meta-chip">
+              Live {prices.summary.live ?? 0}/{prices?.tickers?.length ?? 0}
+            </div>
+          ) : null}
           {mainCacheInfo ? (
             <div className={`meta-chip cache-chip ${mainCacheInfo.isStale ? "stale" : "cached"}`}>
               {mainFromCache ? "Cached" : "Updated"} {formatCacheTime(mainCacheInfo.fetchedAt)}
@@ -1033,6 +1054,7 @@ function App() {
           {prices?.tickers?.length
             ? prices.tickers.map((ticker) => {
                 const tone = typeof ticker.change === "number" && ticker.change < 0 ? "negative" : "positive";
+                const statusDescription = describePriceStatus(ticker);
                 return (
                   <article key={ticker.id} className="panel card fade-up">
                     <div className="card-row">
@@ -1043,6 +1065,12 @@ function App() {
                     <Sparkline values={ticker.history_points?.map((p) => p.value) ?? []} tone={tone} />
                     <span className="ticker-meta">
                       {ticker.history_meta?.data_start ? `Data since ${ticker.history_meta.data_start}` : "Data availability pending"}
+                    </span>
+                    <span className="ticker-meta">
+                      {statusDescription}
+                    </span>
+                    <span className="ticker-meta">
+                      Provider: {ticker.provider ?? ticker.source ?? "N/A"} · Age: {typeof ticker.age_seconds === "number" ? `${ticker.age_seconds}s` : "N/A"}
                     </span>
                     {typeof ticker.value !== "number" && (ticker.error_reason || ticker.error) ? (
                       <span className="ticker-meta warning">

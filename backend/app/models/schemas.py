@@ -29,8 +29,12 @@ class PriceTicker(BaseModel):
     last_updated: str | None
     as_of: str | None = None
     source: str | None
+    provider: str | None = None
     status: str
     quality: str
+    age_seconds: int | None = None
+    freshness_seconds: int | None = None
+    fetch_latency_ms: float | None = None
     error: str | None = None
     error_reason: str | None = None
     tried_sources: List[str] = Field(default_factory=list)
@@ -44,6 +48,27 @@ class PricesResponse(BaseModel):
     tickers: List[PriceTicker]
     errors: dict[str, str] = Field(default_factory=dict)
     timed_out: bool = False
+    cache_bypassed: bool = False
+    summary: dict[str, int] = Field(default_factory=dict)
+
+
+class PriceProviderHealthItem(BaseModel):
+    id: str
+    symbol: str
+    stooq_symbol: str | None
+    yfinance_symbol: str | None
+    has_mapping: bool
+    cache_status: str
+    last_updated: str | None
+    last_error: str | None = None
+    age_seconds: int | None = None
+
+
+class PriceProviderHealthResponse(BaseModel):
+    as_of: str
+    overall_status: str
+    live_ratio: float
+    instruments: List[PriceProviderHealthItem]
 
 
 class PriceHistoryResponse(BaseModel):

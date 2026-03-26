@@ -10,6 +10,7 @@ from ..models.schemas import (
     MacroSeriesResponse,
     PriceHistoryResponse,
     PricesResponse,
+    PriceProviderHealthResponse,
     FactorsSnapshot,
     RecomputeResponse,
     SignalCard,
@@ -26,7 +27,11 @@ from ..services.macro_series_service import (
     get_series_payload,
 )
 from ..services.macro_service import get_macro_payload
-from ..services.price_service import get_price_history_payload, get_prices_payload
+from ..services.price_service import (
+    get_price_history_payload,
+    get_price_provider_health_payload,
+    get_prices_payload,
+)
 from ..services.signal_service import (
     get_factors_payload,
     get_signal_payload,
@@ -45,8 +50,13 @@ def healthcheck() -> HealthResponse:
 
 
 @router.get("/prices", response_model=PricesResponse)
-async def prices() -> PricesResponse:
-    return await get_prices_payload()
+async def prices(bypass_cache: bool = False) -> PricesResponse:
+    return await get_prices_payload(bypass_cache=bypass_cache)
+
+
+@router.get("/prices/debug/health", response_model=PriceProviderHealthResponse)
+async def prices_health() -> PriceProviderHealthResponse:
+    return await get_price_provider_health_payload()
 
 
 @router.get("/prices/history", response_model=PriceHistoryResponse)
@@ -153,4 +163,3 @@ async def news_event(event_id: str) -> NewsEventItem:
 async def news_sync(months_back: int = 6, months_forward: int = 1) -> NewsSyncResponse:
     result = await sync_news(months_back=months_back, months_forward=months_forward)
     return NewsSyncResponse(ok=True, **result)
-
