@@ -56,8 +56,9 @@ _cache_snapshot_version: int = 0
 _price_request_id: ContextVar[str] = ContextVar("price_request_id", default="-")
 _price_debug_enabled: ContextVar[bool] = ContextVar("price_debug_enabled", default=False)
 SHARED_WAITER_TIMEOUT_SECONDS = 2.2
-_persistence_write_lock = asyncio.Lock()
-_persistence_tasks: set[asyncio.Task] = set()
+_persistence_worker_lock = asyncio.Lock()
+_persistence_worker_task: asyncio.Task | None = None
+_persistence_pending_by_symbol: dict[str, dict] = {}
 
 
 _store_cache: dict[str, PriceHistoryStore] = {}
@@ -208,12 +209,84 @@ async def _persist_latest_with_retry(store: PriceHistoryStore, ticker_id: str, l
             await asyncio.sleep(backoff)
 
 
-async def _persist_live_tickers_background(store: PriceHistoryStore, tickers: list[dict], request_id: str) -> None:
-    persistence_errors = 0
-    logger.info("persistence_batch_started rid=%s batch_size=%s", request_id, len(tickers))
-    async with _persistence_write_lock:
+def _parse_iso_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _should_replace_pending(existing: dict, incoming: dict) -> bool:
+    existing_dt = _parse_iso_timestamp(existing.get("as_of"))
+    incoming_dt = _parse_iso_timestamp(incoming.get("as_of"))
+    if existing_dt and incoming_dt:
+        return incoming_dt >= existing_dt
+    if incoming_dt and not existing_dt:
+        return True
+    if not incoming_dt and existing_dt:
+        return False
+    return incoming.get("enqueued_at", datetime.utcnow()) >= existing.get("enqueued_at", datetime.utcnow())
+
+
+async def _run_persistence_worker(store: PriceHistoryStore) -> None:
+    global _persistence_worker_task
+    while True:
+        async with _persistence_worker_lock:
+            if not _persistence_pending_by_symbol:
+                _persistence_worker_task = None
+                return
+            pending_items = list(_persistence_pending_by_symbol.values())
+            _persistence_pending_by_symbol.clear()
+
+        request_ids = sorted({str(item.get("request_id") or "-") for item in pending_items})
+        joined_rids = ",".join(request_ids)
+        logger.info("persistence_batch_started rid=%s batch_size=%s", joined_rids, len(pending_items))
+        started = perf_counter()
+        persistence_errors = 0
+
+        for item in pending_items:
+            ticker_id = str(item["symbol"])
+            request_id = str(item.get("request_id") or "-")
+            try:
+                await _persist_latest_with_retry(store, ticker_id, item["latest_payload"])
+            except Exception as exc:  # noqa: BLE001
+                persistence_errors += 1
+                logger.warning(
+                    "persistence_symbol_failed rid=%s symbol=%s error=%s",
+                    request_id,
+                    ticker_id,
+                    exc,
+                )
+            else:
+                logger.info("persistence_symbol_success rid=%s symbol=%s", request_id, ticker_id)
+
+        elapsed_ms = (perf_counter() - started) * 1000
+        logger.info(
+            "persistence_batch_completed rid=%s batch_size=%s persistence_errors=%s duration_ms=%.1f",
+            joined_rids,
+            len(pending_items),
+            persistence_errors,
+            elapsed_ms,
+        )
+
+
+async def _schedule_persistence(store: PriceHistoryStore, tickers: list[dict], request_id: str) -> None:
+    global _persistence_worker_task
+    if not tickers:
+        return
+    enqueued = 0
+    skipped = 0
+    replaced = 0
+    now = datetime.utcnow()
+    async with _persistence_worker_lock:
         for ticker in tickers:
-            ticker_id = str(ticker.get("id"))
+            ticker_id = str(ticker.get("id") or "")
+            if not ticker_id:
+                continue
             latest_payload = {
                 "value": ticker.get("value"),
                 "change": ticker.get("change"),
@@ -221,25 +294,47 @@ async def _persist_live_tickers_background(store: PriceHistoryStore, tickers: li
                 "last_updated": ticker.get("last_updated"),
                 "source": ticker.get("provider") or ticker.get("source"),
             }
-            try:
-                await _persist_latest_with_retry(store, ticker_id, latest_payload)
-            except Exception as exc:  # noqa: BLE001
-                persistence_errors += 1
-                logger.warning("Price persistence failed for %s rid=%s: %s", ticker_id, request_id, exc)
+            incoming = {
+                "symbol": ticker_id,
+                "request_id": request_id,
+                "as_of": ticker.get("last_updated") or ticker.get("as_of"),
+                "latest_payload": latest_payload,
+                "enqueued_at": now,
+            }
+            existing = _persistence_pending_by_symbol.get(ticker_id)
+            if existing is None:
+                _persistence_pending_by_symbol[ticker_id] = incoming
+                enqueued += 1
+                continue
+            if _should_replace_pending(existing, incoming):
+                _persistence_pending_by_symbol[ticker_id] = incoming
+                replaced += 1
             else:
-                logger.info("Price persistence succeeded for %s rid=%s", ticker_id, request_id)
-    if persistence_errors:
-        logger.warning("persistence_batch_completed rid=%s persistence_errors=%s", request_id, persistence_errors)
-    else:
-        logger.info("persistence_batch_completed rid=%s persistence_errors=0", request_id)
+                skipped += 1
+                logger.info("persistence_batch_skipped_as_stale rid=%s symbol=%s", request_id, ticker_id)
+
+        logger.info(
+            "persistence_batch_enqueued rid=%s enqueued=%s replaced=%s skipped=%s pending=%s",
+            request_id,
+            enqueued,
+            replaced,
+            skipped,
+            len(_persistence_pending_by_symbol),
+        )
+        if _persistence_worker_task and not _persistence_worker_task.done():
+            logger.info("persistence_batch_waiting_for_writer rid=%s", request_id)
+            return
+        _persistence_worker_task = asyncio.create_task(_run_persistence_worker(store))
 
 
-def _schedule_persistence(store: PriceHistoryStore, tickers: list[dict], request_id: str) -> None:
-    if not tickers:
-        return
-    task = asyncio.create_task(_persist_live_tickers_background(store, tickers, request_id))
-    _persistence_tasks.add(task)
-    task.add_done_callback(_persistence_tasks.discard)
+async def _wait_for_persistence_idle(timeout_seconds: float = 5.0) -> None:
+    deadline = perf_counter() + timeout_seconds
+    while perf_counter() < deadline:
+        worker = _persistence_worker_task
+        if (worker is None or worker.done()) and not _persistence_pending_by_symbol:
+            return
+        await asyncio.sleep(0.01)
+    raise TimeoutError("Persistence worker did not drain pending batches in time")
 
 
 def _seed_for_config(config: PriceConfig) -> dict[str, object] | None:
@@ -1104,7 +1199,7 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
         ticker for ticker in tickers
         if ticker.get("status") == "live" and isinstance(ticker.get("value"), (int, float))
     ]
-    _schedule_persistence(store, live_tickers_for_persistence, _price_request_id.get())
+    await _schedule_persistence(store, live_tickers_for_persistence, _price_request_id.get())
     for ticker in tickers:
         if ticker.get("error") or ticker.get("status") in {"error", "empty", "unsupported"}:
             errors[str(ticker.get("id"))] = str(ticker.get("error") or ticker.get("error_reason") or "error")

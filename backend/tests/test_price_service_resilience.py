@@ -780,7 +780,7 @@ async def test_persistence_retry_does_not_block_response_completion(monkeypatch)
     async def fake_store():
         return _FakeStore()
 
-    def slow_schedule(*_args, **_kwargs):
+    async def slow_schedule(*_args, **_kwargs):
         async def _slow():
             await asyncio.sleep(0.5)
         asyncio.create_task(_slow())
@@ -800,7 +800,7 @@ async def test_follower_gets_fresh_while_persistence_retries(monkeypatch):
     async def refresh(*_args, **_kwargs):
         return PricesResponse(as_of="2026-01-01T00:00:00Z", tickers=[], errors={}, timed_out=False, summary={"ok_live": 1})
 
-    def slow_schedule(*_args, **_kwargs):
+    async def slow_schedule(*_args, **_kwargs):
         async def _slow():
             await asyncio.sleep(0.5)
         asyncio.create_task(_slow())
@@ -913,3 +913,72 @@ async def test_secondary_history_work_does_not_block_spot_refresh(monkeypatch):
     assert payload.summary["ok_live"] == 1
     assert elapsed < 0.2
     history_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_persistence_batches_use_single_writer_and_do_not_overlap(monkeypatch):
+    class SlowStore(_FakeStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.active_writers = 0
+            self.max_active_writers = 0
+            self.calls: list[str] = []
+
+        async def upsert_latest(self, symbol: str, payload: dict):
+            self.active_writers += 1
+            self.max_active_writers = max(self.max_active_writers, self.active_writers)
+            self.calls.append(symbol)
+            await asyncio.sleep(0.05)
+            self.latest[symbol] = payload
+            self.active_writers -= 1
+
+    store = SlowStore()
+    price_service._persistence_pending_by_symbol.clear()
+    price_service._persistence_worker_task = None
+
+    await asyncio.gather(
+        price_service._schedule_persistence(
+            store,
+            [{"id": "sp500", "value": 1.0, "change_pct": 0.1, "last_updated": "2026-01-01", "provider": "stooq"}],
+            "rid-1",
+        ),
+        price_service._schedule_persistence(
+            store,
+            [{"id": "nas100", "value": 2.0, "change_pct": 0.2, "last_updated": "2026-01-01", "provider": "stooq"}],
+            "rid-2",
+        ),
+    )
+    await price_service._wait_for_persistence_idle()
+
+    assert store.max_active_writers == 1
+    assert set(store.calls) == {"sp500", "nas100"}
+
+
+@pytest.mark.asyncio
+async def test_persistence_coalesces_older_symbol_updates(monkeypatch):
+    class RecordingStore(_FakeStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.writes: list[tuple[str, float]] = []
+
+        async def upsert_latest(self, symbol: str, payload: dict):
+            self.writes.append((symbol, float(payload["value"])))
+            self.latest[symbol] = payload
+
+    store = RecordingStore()
+    price_service._persistence_pending_by_symbol.clear()
+    price_service._persistence_worker_task = None
+
+    await price_service._schedule_persistence(
+        store,
+        [{"id": "sp500", "value": 100.0, "change_pct": 0.1, "last_updated": "2026-01-01", "provider": "stooq"}],
+        "rid-old",
+    )
+    await price_service._schedule_persistence(
+        store,
+        [{"id": "sp500", "value": 200.0, "change_pct": 0.2, "last_updated": "2026-01-02", "provider": "stooq"}],
+        "rid-new",
+    )
+    await price_service._wait_for_persistence_idle()
+
+    assert store.latest["sp500"]["value"] == 200.0
