@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 
 import pytest
@@ -159,3 +160,93 @@ async def test_known_unsupported_stooq_symbol_skips_network():
     rows, error = await price_service._fetch_stooq_rows(NeverClient(), "spx")  # type: ignore[arg-type]
     assert rows == []
     assert error == "unsupported_symbol"
+
+
+@pytest.mark.asyncio
+async def test_timeout_returns_stale_or_empty_without_crash(monkeypatch):
+    cfg = PriceConfig("slow", "SLOW", "Slow", "index", "pts", "", (), "SLOW")
+    monkeypatch.setattr(price_service, "PRICE_TICKERS", (cfg,))
+
+    async def fake_build(*_args, **_kwargs):
+        await asyncio.sleep(0.2)
+        return {}
+
+    async def fake_cached(config, _store, error=None, allow_seed=False):
+        return {
+            "id": config.id,
+            "symbol": config.symbol,
+            "name": config.name,
+            "asset_class": config.asset_class,
+            "unit": config.unit,
+            "value": None,
+            "change": None,
+            "change_pct": None,
+            "last_updated": None,
+            "as_of": "2026-01-01T00:00:00Z",
+            "source": None,
+            "provider": None,
+            "status": "error",
+            "quality": "low",
+            "history_points": [],
+            "history_meta": {"data_start": None, "data_end": None, "interval": "1d", "points_count": 0},
+            "tried_sources": [],
+            "stale": False,
+            "error": error or "timeout",
+            "error_reason": "timeout",
+        }
+
+    async def fake_store():
+        return _FakeStore()
+
+    monkeypatch.setattr(price_service, "_build_ticker_payload", fake_build)
+    monkeypatch.setattr(price_service, "_build_cached_payload", fake_cached)
+    monkeypatch.setattr(price_service, "_get_store", fake_store)
+    monkeypatch.setattr(price_service, "get_settings", lambda: type("S", (), {
+        "cache_ttl_prices": 0,
+        "price_fetch_timeout_seconds": 0.01,
+        "price_fetch_concurrency": 1,
+        "allow_seed_prices": False,
+    })())
+    payload = await price_service.get_prices_payload(bypass_cache=True)
+    assert payload.timed_out is True
+    assert payload.tickers[0].status == "error"
+
+
+@pytest.mark.asyncio
+async def test_summary_counters_consistent(monkeypatch):
+    configs = (
+        PriceConfig("a", "A", "A", "index", "pts", "", (), "A"),
+        PriceConfig("b", "B", "B", "index", "pts", "", (), "B"),
+    )
+    monkeypatch.setattr(price_service, "PRICE_TICKERS", configs)
+
+    async def fake_build(config, *_args, **_kwargs):
+        status = "live" if config.id == "a" else "stale"
+        return {
+            "id": config.id,
+            "symbol": config.symbol,
+            "name": config.name,
+            "asset_class": config.asset_class,
+            "unit": config.unit,
+            "value": 1.0,
+            "change": 0.1,
+            "change_pct": 0.1,
+            "last_updated": "2026-01-01",
+            "as_of": "2026-01-01T00:00:00Z",
+            "source": "db",
+            "provider": "db",
+            "status": status,
+            "quality": "low",
+            "history_points": [],
+            "history_meta": {"data_start": None, "data_end": None, "interval": "1d", "points_count": 0},
+            "tried_sources": [],
+            "stale": status != "live",
+        }
+
+    async def fake_store():
+        return _FakeStore()
+
+    monkeypatch.setattr(price_service, "_build_ticker_payload", fake_build)
+    monkeypatch.setattr(price_service, "_get_store", fake_store)
+    payload = await price_service.get_prices_payload(bypass_cache=True)
+    assert payload.summary["live"] + payload.summary["stale"] == len(payload.tickers)

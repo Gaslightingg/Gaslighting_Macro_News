@@ -1,15 +1,12 @@
-from app.services.price_catalog import get_price_config
-from app.services.symbols import get_symbol_mapping
+from app.services.provider_map import PROVIDER_MAP
+
+
+def test_provider_map_contains_all_instruments():
+    expected = {"sp500", "nas100", "nqmini", "eurusd", "gbpusd", "gbpjpy", "xauusd"}
+    assert set(PROVIDER_MAP.keys()) == expected
 
 
 def test_index_instruments_use_yfinance_primary():
-    for ticker_id, expected_symbol in (
-        ("sp500", "^GSPC"),
-        ("nas100", "^NDX"),
-        ("nqmini", "MNQ=F"),
-    ):
-        config = get_price_config(ticker_id)
-        assert config is not None
-        mapping = get_symbol_mapping(ticker_id)
-        assert mapping.get("yfinance") == expected_symbol
-        assert not mapping.get("stooq")
+    assert PROVIDER_MAP["sp500"].latest_chain[0].symbol == "^GSPC"
+    assert PROVIDER_MAP["nas100"].latest_chain[0].symbol == "^NDX"
+    assert PROVIDER_MAP["nqmini"].latest_chain[0].symbol == "MNQ=F"

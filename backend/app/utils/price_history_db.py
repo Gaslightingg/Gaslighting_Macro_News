@@ -73,10 +73,6 @@ class PriceHistoryStore:
                 """
             )
 
-            # Idempotent migration: only add the column if it does not exist.
-            await self._add_column_if_missing(conn, "price_history", "value", "REAL")
-            await self._add_column_if_missing(conn, "price_latest", "value", "REAL")
-
             await self._log_schema(conn, "price_history")
             await self._log_schema(conn, "price_latest")
             await conn.commit()
@@ -90,20 +86,6 @@ class PriceHistoryStore:
             raise RuntimeError("PriceHistoryStore connection is not initialized")
         return self._conn
 
-    async def _add_column_if_missing(
-        self,
-        conn: aiosqlite.Connection,
-        table_name: str,
-        column_name: str,
-        column_def: str,
-    ) -> None:
-        async with conn.execute(f"PRAGMA table_info({table_name})") as cur:
-            rows = await cur.fetchall()
-        existing_columns = {row[1] for row in rows}
-        if column_name in existing_columns:
-            return
-        await conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
-
     async def _log_schema(self, conn: aiosqlite.Connection, table_name: str) -> None:
         async with conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
@@ -116,7 +98,7 @@ class PriceHistoryStore:
     async def get_history(self, symbol: str) -> list[HistoryPoint]:
         conn = await self._get_connection()
         async with conn.execute(
-            "SELECT as_of AS date, price AS value FROM price_history WHERE symbol = ? ORDER BY as_of ASC",
+            "SELECT as_of AS date, COALESCE(price, value) AS value FROM price_history WHERE symbol = ? ORDER BY as_of ASC",
             (symbol,),
         ) as cur:
             rows = await cur.fetchall()
@@ -158,7 +140,7 @@ class PriceHistoryStore:
         async with conn.execute(
             """
             SELECT symbol,
-                   price AS value,
+                   COALESCE(price, value) AS value,
                    change_pct AS change,
                    change_pct AS change_pct,
                    as_of AS last_updated,

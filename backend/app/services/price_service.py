@@ -21,6 +21,7 @@ from ..models.schemas import (
 )
 from ..providers.price_normalizer import normalize_price_ticker
 from ..services.price_catalog import PRICE_TICKERS, PriceConfig, resolve_price_config
+from ..services.provider_map import get_provider_plan
 from ..services.symbols import get_symbol_mapping
 from ..utils.price_history_db import HistoryPoint, PriceHistoryStore
 from ..utils.settings import get_settings
@@ -270,76 +271,65 @@ async def _fetch_stooq_history(
     return points
 
 
-async def _fetch_yfinance_latest(symbol: str, timeout_seconds: float) -> tuple[float, float, str] | None:
+async def _fetch_yahoo_chart_rows(
+    client: httpx.AsyncClient,
+    symbol: str,
+    *,
+    range_key: str,
+) -> tuple[list[tuple[str, float]], str | None]:
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    response = await _request_with_retries(client, url, {"interval": "1d", "range": range_key}, retries=1)
+    if response is None:
+        return [], "provider_error"
     try:
-        import yfinance as yf
-    except ImportError:
+        payload = response.json()
+    except ValueError:
+        return [], "parse_error"
+    chart = ((payload or {}).get("chart") or {})
+    result = (chart.get("result") or [None])[0] or {}
+    timestamps = result.get("timestamp") or []
+    quote = (((result.get("indicators") or {}).get("quote") or [None])[0] or {})
+    closes = quote.get("close") or []
+    if not timestamps or not closes:
+        return [], "no_data"
+    points: list[tuple[str, float]] = []
+    for ts, close in zip(timestamps, closes):
+        if close is None:
+            continue
+        try:
+            value = float(close)
+            date = datetime.utcfromtimestamp(int(ts)).strftime("%Y-%m-%d")
+        except Exception:
+            continue
+        points.append((date, value))
+    if not points:
+        return [], "no_data"
+    return points, None
+
+
+async def _fetch_yfinance_latest(
+    client: httpx.AsyncClient,
+    symbol: str,
+    timeout_seconds: float,
+) -> tuple[float, float, str] | None:
+    points, _error = await _fetch_yahoo_chart_rows(client, symbol, range_key="5d")
+    if len(points) < 2:
         return None
-
-    def _run() -> tuple[float, float, str] | None:
-        try:
-            history = yf.Ticker(symbol).history(period="5d", interval="1d")
-        except Exception:
-            return None
-        if history.empty or len(history) < 2:
-            return None
-        latest = history.iloc[-1]
-        previous = history.iloc[-2]
-        try:
-            latest_close = float(latest["Close"])
-            previous_close = float(previous["Close"])
-        except Exception:
-            return None
-        if previous_close == 0:
-            return None
-        change_pct = ((latest_close - previous_close) / previous_close) * 100
-        return latest_close, round(change_pct, 2), latest.name.strftime("%Y-%m-%d")
-
-    for attempt in range(2):
-        try:
-            result = await asyncio.wait_for(asyncio.to_thread(_run), timeout=timeout_seconds)
-        except asyncio.TimeoutError:
-            result = None
-        if result:
-            return result
-        await asyncio.sleep(0.4 * (attempt + 1))
-    logger.warning("yfinance returned no data for symbol=%s", symbol)
-    return None
+    latest_date, latest_close = points[-1]
+    _prev_date, prev_close = points[-2]
+    if prev_close == 0:
+        return None
+    change_pct = ((latest_close - prev_close) / prev_close) * 100
+    return latest_close, round(change_pct, 2), latest_date
 
 
-async def _fetch_yfinance_history(symbol: str, timeout_seconds: float) -> list[HistoryPoint]:
-    try:
-        import yfinance as yf
-    except ImportError:
-        return []
-
-    def _run() -> list[HistoryPoint]:
-        try:
-            history = yf.Ticker(symbol).history(period="10y", interval="1d")
-        except Exception:
-            return []
-        if history.empty:
-            return []
-        points: list[HistoryPoint] = []
-        for idx, row in history.iterrows():
-            try:
-                value = float(row["Close"])
-            except (KeyError, ValueError, TypeError):
-                continue
-            date = idx.strftime("%Y-%m-%d")
-            points.append(HistoryPoint(date=date, value=value, change_pct=None))
-        return points
-
-    for attempt in range(2):
-        try:
-            points = await asyncio.wait_for(asyncio.to_thread(_run), timeout=timeout_seconds)
-        except asyncio.TimeoutError:
-            points = []
-        if points:
-            return points
-        await asyncio.sleep(0.5 * (attempt + 1))
-    logger.warning("yfinance returned empty history for symbol=%s", symbol)
-    return []
+async def _fetch_yfinance_history(
+    client: httpx.AsyncClient,
+    symbol: str,
+    timeout_seconds: float,
+) -> list[HistoryPoint]:
+    points, _error = await _fetch_yahoo_chart_rows(client, symbol, range_key="10y")
+    return [HistoryPoint(date=date, value=value, change_pct=None) for date, value in points]
 
 
 def _resolve_symbols(config: PriceConfig) -> dict[str, str | None]:
@@ -383,9 +373,10 @@ def _log_ticker_result(
     source: str | None,
     latency_ms: float,
     error_reason: str | None,
+    fallback_chain: list[str] | None = None,
 ) -> None:
     logger.info(
-        "price_fetch ticker=%s symbol=%s provider=%s status=%s source=%s latency_ms=%.1f error_reason=%s",
+        "price_fetch ticker=%s symbol=%s provider=%s status=%s source=%s latency_ms=%.1f error_reason=%s fallback_chain=%s",
         config.id,
         config.symbol,
         provider or "none",
@@ -393,6 +384,7 @@ def _log_ticker_result(
         source or "none",
         latency_ms,
         error_reason or "none",
+        ",".join(fallback_chain or []),
     )
 
 
@@ -408,19 +400,17 @@ async def _ensure_history(
     if points and _is_fresh(last_update, HISTORY_TTL):
         return points
 
-    symbols = _resolve_symbols(config)
-    if symbols.get("stooq"):
-        fresh_points = await _fetch_stooq_history(client, symbols["stooq"])
+    plan = get_provider_plan(config.id)
+    chain = plan.history_chain if plan else ()
+    for attempt in chain:
+        if attempt.provider == "stooq":
+            fresh_points = await _fetch_stooq_history(client, attempt.symbol)
+        elif attempt.provider == "yfinance":
+            fresh_points = await _fetch_yfinance_history(client, attempt.symbol, timeout_seconds=timeout_seconds)
+        else:
+            fresh_points = []
         if fresh_points:
             return fresh_points
-
-    fresh_points = (
-        await _fetch_yfinance_history(symbols["yfinance"], timeout_seconds=timeout_seconds)
-        if symbols.get("yfinance")
-        else []
-    )
-    if fresh_points:
-        return fresh_points
     return points
 
 
@@ -440,15 +430,20 @@ async def _ensure_latest(
         cached["tried_sources"] = []
         return cached
 
-    symbols = _resolve_symbols(config)
+    plan = get_provider_plan(config.id)
+    if not plan:
+        return {"status": "error", "error_reason": "no_sources_configured", "tried_sources": []}
     tried_sources: list[str] = []
     error_reason: str | None = None
-
-    stooq_candidates = [symbols.get("stooq"), *(symbols.get("stooq_fallbacks") or ())]
-    stooq_candidates = [symbol for symbol in stooq_candidates if symbol]
-    for candidate in stooq_candidates:
-        tried_sources.append(f"stooq:{candidate}")
-        latest, stooq_error = await _fetch_stooq_latest(client, candidate)
+    for attempt in plan.latest_chain:
+        tried_sources.append(f"{attempt.provider}:{attempt.symbol}")
+        latest: tuple[float, float, str] | None = None
+        current_error: str | None = None
+        if attempt.provider == "stooq":
+            latest, current_error = await _fetch_stooq_latest(client, attempt.symbol)
+        elif attempt.provider == "yfinance":
+            latest = await _fetch_yfinance_latest(client, attempt.symbol, timeout_seconds=timeout_seconds)
+            current_error = None if latest else "yfinance_failed"
         if latest:
             value, change_pct, date = latest
             payload = {
@@ -456,38 +451,16 @@ async def _ensure_latest(
                 "change": change_pct,
                 "change_pct": change_pct,
                 "last_updated": date,
-                "source": "stooq",
-                "provider": "stooq",
+                "source": attempt.provider,
+                "provider": attempt.provider,
+                "provider_symbol": attempt.symbol,
                 "status": "live",
                 "quality": "high",
                 "tried_sources": tried_sources,
                 "_persist": True,
             }
             return payload
-        error_reason = stooq_error or "stooq_failed"
-
-    if symbols.get("yfinance"):
-        tried_sources.append(f"yfinance:{symbols['yfinance']}")
-        latest = await _fetch_yfinance_latest(
-            symbols["yfinance"],
-            timeout_seconds=timeout_seconds,
-        )
-        if latest:
-            value, change_pct, date = latest
-            payload = {
-                "value": value,
-                "change": change_pct,
-                "change_pct": change_pct,
-                "last_updated": date,
-                "source": "yfinance",
-                "provider": "yfinance",
-                "status": "live",
-                "quality": "high",
-                "tried_sources": tried_sources,
-                "_persist": True,
-            }
-            return payload
-        error_reason = "yfinance_failed"
+        error_reason = current_error or error_reason or "provider_error"
 
     if not tried_sources and error_reason is None:
         error_reason = "no_sources_configured"
@@ -510,7 +483,7 @@ async def get_prices_payload(*, bypass_cache: bool = False) -> PricesResponse:
     start_time = datetime.utcnow()
     settings = get_settings()
     cache_ttl = timedelta(seconds=settings.cache_ttl_prices)
-    effective_timeout = min(settings.price_fetch_timeout_seconds, 6.0)
+    effective_timeout = min(settings.price_fetch_timeout_seconds, 1.8)
     cache_hit = False
 
     if not bypass_cache:
@@ -527,7 +500,7 @@ async def get_prices_payload(*, bypass_cache: bool = False) -> PricesResponse:
     timed_out = False
     http_timeout = httpx.Timeout(
         timeout=effective_timeout,
-        connect=min(2.5, effective_timeout),
+        connect=min(1.0, effective_timeout),
     )
     async with httpx.AsyncClient(timeout=http_timeout) as client:
         semaphore = asyncio.Semaphore(settings.price_fetch_concurrency)
@@ -575,6 +548,7 @@ async def get_prices_payload(*, bypass_cache: bool = False) -> PricesResponse:
                 source=ticker.get("source"),
                 latency_ms=latency_ms,
                 error_reason=ticker.get("error_reason") or ticker.get("error"),
+                fallback_chain=list(ticker.get("tried_sources") or []),
             )
             return config.id, ticker
 
@@ -765,6 +739,8 @@ async def _build_ticker_payload_inner(
             error_reason = error_reason or "no_price_data"
             if error_reason in {"no_sources_configured", "unsupported_symbol"}:
                 safe_status = "unsupported"
+            elif error_reason not in {"no_price_data", "no_cached_price"}:
+                safe_status = "error"
             latest = {
                 "value": "N/A",
                 "change": "N/A",
