@@ -46,8 +46,12 @@ _prices_cache_lock = asyncio.Lock()
 _prices_refresh_task: asyncio.Task | None = None
 _prices_refresh_lock = asyncio.Lock()
 _provider_cooldowns: dict[str, datetime] = {}
+_inflight_task_created_at: datetime | None = None
+_inflight_task_result_published_at: datetime | None = None
+_snapshot_written_at: datetime | None = None
 _price_request_id: ContextVar[str] = ContextVar("price_request_id", default="-")
 _price_debug_enabled: ContextVar[bool] = ContextVar("price_debug_enabled", default=False)
+SHARED_WAITER_TIMEOUT_SECONDS = 2.2
 
 
 _store_cache: dict[str, PriceHistoryStore] = {}
@@ -589,20 +593,63 @@ async def get_prices_payload(*, bypass_cache: bool = False, request_id: str | No
 
     async with _prices_refresh_lock:
         global _prices_refresh_task
+        created = False
         if _prices_refresh_task is None or _prices_refresh_task.done():
             _prices_refresh_task = asyncio.create_task(_refresh_prices_payload(bypass_cache=bypass_cache))
+            global _inflight_task_created_at
+            _inflight_task_created_at = datetime.utcnow()
+            logger.info("inflight_task_created rid=%s created_at=%s", _price_request_id.get(), _inflight_task_created_at.isoformat())
+            created = True
         refresh_task = _prices_refresh_task
+        if not created:
+            logger.info(
+                "inflight_task_reused rid=%s waiter_rid=%s done=%s cancelled=%s",
+                _price_request_id.get(),
+                request_id or "none",
+                refresh_task.done(),
+                refresh_task.cancelled(),
+            )
 
+    waiter_started = perf_counter()
     try:
-        payload = await asyncio.wait_for(asyncio.shield(refresh_task), timeout=2.2)
+        payload = await asyncio.wait_for(asyncio.shield(refresh_task), timeout=SHARED_WAITER_TIMEOUT_SECONDS)
         if payload is None:
             logger.error("Prices refresh returned None; using controlled snapshot")
             payload = await _build_prices_snapshot(error_reason="refresh_none")
         return payload
     except asyncio.TimeoutError:
+        waiter_elapsed_ms = (perf_counter() - waiter_started) * 1000
+        if refresh_task.done() and not refresh_task.cancelled():
+            try:
+                payload = refresh_task.result()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("inflight_task_done_after_timeout but result failed: %s", exc)
+            else:
+                if payload is not None:
+                    logger.info(
+                        "follower_received_fresh_snapshot=true rid=%s waiter_timeout_ms=%.1f",
+                        _price_request_id.get(),
+                        waiter_elapsed_ms,
+                    )
+                    return payload
+        async with _prices_cache_lock:
+            cached_payload = _prices_cache.get("payload")
+            cached_at = _prices_cache.get("fetched_at")
+            if cached_payload and isinstance(cached_at, datetime):
+                logger.info(
+                    "follower_received_fresh_snapshot=true rid=%s snapshot_written_at=%s waiter_timeout_ms=%.1f",
+                    _price_request_id.get(),
+                    cached_at.isoformat(),
+                    waiter_elapsed_ms,
+                )
+                return cached_payload
         snapshot = await _build_prices_snapshot(error_reason="refresh_timeout")
         if snapshot is not None:
-            logger.warning("Shared prices refresh timed out; serving stale snapshot")
+            logger.warning(
+                "Shared prices refresh timed out; serving stale snapshot rid=%s waiter_timeout_ms=%.1f stale_served_reason=refresh_timeout",
+                _price_request_id.get(),
+                waiter_elapsed_ms,
+            )
             return snapshot
         logger.error("Shared prices refresh timed out and no snapshot available")
         return await _build_empty_prices_response("refresh_timeout_no_snapshot")
@@ -805,6 +852,14 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
         if not bypass_cache:
             _prices_cache["payload"] = response
             _prices_cache["fetched_at"] = now
+            global _snapshot_written_at, _inflight_task_result_published_at
+            _snapshot_written_at = now
+            _inflight_task_result_published_at = datetime.utcnow()
+            logger.info(
+                "inflight_task_result_published_at=%s snapshot_written_at=%s",
+                _inflight_task_result_published_at.isoformat(),
+                _snapshot_written_at.isoformat(),
+            )
     return response
 
 

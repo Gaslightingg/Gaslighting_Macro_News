@@ -351,3 +351,35 @@ async def test_timeout_without_snapshot_returns_empty_controlled_payload(monkeyp
     payload = await price_service.get_prices_payload(bypass_cache=True, request_id="t3")
     assert payload is not None
     assert all(item.status == "empty" for item in payload.tickers)
+
+
+@pytest.mark.asyncio
+async def test_follower_gets_fresh_when_refresh_finishes_before_timeout(monkeypatch):
+    async def refresh(*_args, **_kwargs):
+        await asyncio.sleep(0.02)
+        return PricesResponse(as_of="2026-01-01T00:00:00Z", tickers=[], errors={}, timed_out=False, summary={})
+
+    monkeypatch.setattr(price_service, "_refresh_prices_payload", refresh)
+    monkeypatch.setattr(price_service, "SHARED_WAITER_TIMEOUT_SECONDS", 0.2)
+    price_service._prices_refresh_task = None
+
+    first, second = await asyncio.gather(
+        price_service.get_prices_payload(bypass_cache=True, request_id="a1"),
+        price_service.get_prices_payload(bypass_cache=True, request_id="a2"),
+    )
+    assert first.timed_out is False
+    assert second.timed_out is False
+
+
+@pytest.mark.asyncio
+async def test_follower_near_timeout_boundary_gets_fresh(monkeypatch):
+    async def refresh(*_args, **_kwargs):
+        await asyncio.sleep(0.045)
+        return PricesResponse(as_of="2026-01-01T00:00:00Z", tickers=[], errors={}, timed_out=False, summary={})
+
+    monkeypatch.setattr(price_service, "_refresh_prices_payload", refresh)
+    monkeypatch.setattr(price_service, "SHARED_WAITER_TIMEOUT_SECONDS", 0.05)
+    price_service._prices_refresh_task = None
+
+    result = await price_service.get_prices_payload(bypass_cache=True, request_id="b1")
+    assert result.timed_out is False
