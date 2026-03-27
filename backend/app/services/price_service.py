@@ -956,24 +956,45 @@ async def get_prices_payload(*, bypass_cache: bool = False, request_id: str | No
         return task.result()
 
     waiter_started = perf_counter()
-    waiter_deadline = waiter_started + SHARED_WAITER_TIMEOUT_SECONDS
+    waiter_started_at = datetime.utcnow()
+    owner_refresh_budget_seconds = max(4.0, min(settings.price_fetch_timeout_seconds, 1.8) * 3)
+    refresh_age_seconds = (
+        (waiter_started_at - _inflight_task_created_at).total_seconds()
+        if _inflight_task_created_at is not None
+        else 0.0
+    )
+    owner_refresh_deadline_ms = max(0.0, (owner_refresh_budget_seconds - refresh_age_seconds) * 1000)
+    follower_timeout_budget_seconds = SHARED_WAITER_TIMEOUT_SECONDS
+    if not created:
+        follower_timeout_budget_seconds = max(
+            SHARED_WAITER_TIMEOUT_SECONDS,
+            max(0.0, owner_refresh_budget_seconds - refresh_age_seconds) + 0.35,
+        )
+    waiter_deadline = waiter_started + follower_timeout_budget_seconds
     waiter_seen_snapshot_version = _cache_snapshot_version
     if created:
         logger.info(
-            "owner_path_entered rid=%s inflight_owner_rid=%s wait_started_on_task_done=%s cache_snapshot_version=%s",
+            "owner_path_entered rid=%s inflight_owner_rid=%s wait_started_on_task_done=%s cache_snapshot_version=%s follower_wait_started_at=%s refresh_age_ms=%.1f owner_refresh_deadline_ms=%.1f",
             _price_request_id.get(),
             _inflight_owner_rid or "none",
             refresh_task.done(),
             waiter_seen_snapshot_version,
+            waiter_started_at.isoformat(),
+            refresh_age_seconds * 1000,
+            owner_refresh_deadline_ms,
         )
     else:
         logger.info(
-            "follower_path_entered rid=%s inflight_owner_rid=%s waiter_deadline_at=%.6f wait_started_on_task_done=%s cache_snapshot_version=%s",
+            "follower_path_entered rid=%s inflight_owner_rid=%s waiter_deadline_at=%.6f wait_started_on_task_done=%s cache_snapshot_version=%s follower_wait_started_at=%s follower_timeout_budget_ms=%.1f refresh_age_ms=%.1f owner_refresh_deadline_ms=%.1f",
             _price_request_id.get(),
             _inflight_owner_rid or "none",
             waiter_deadline,
             refresh_task.done(),
             waiter_seen_snapshot_version,
+            waiter_started_at.isoformat(),
+            follower_timeout_budget_seconds * 1000,
+            refresh_age_seconds * 1000,
+            owner_refresh_deadline_ms,
         )
     try:
         payload = _read_fresh_done_task(refresh_task)
@@ -1015,10 +1036,13 @@ async def get_prices_payload(*, bypass_cache: bool = False, request_id: str | No
                 _inflight_task_result_published_at.isoformat(),
             )
         logger.warning(
-            "timeout_branch_entered rid=%s inflight_owner_rid=%s waiter_timeout_ms=%.1f",
+            "timeout_branch_entered rid=%s inflight_owner_rid=%s waiter_timeout_ms=%.1f follower_timeout_budget_ms=%.1f refresh_age_ms=%.1f owner_refresh_deadline_ms=%.1f",
             _price_request_id.get(),
             _inflight_owner_rid or "none",
             waiter_elapsed_ms,
+            follower_timeout_budget_seconds * 1000,
+            refresh_age_seconds * 1000,
+            owner_refresh_deadline_ms,
         )
         try:
             payload = _read_fresh_done_task(refresh_task)
@@ -1056,11 +1080,18 @@ async def get_prices_payload(*, bypass_cache: bool = False, request_id: str | No
                 return cached_payload
         snapshot = await _build_prices_snapshot(error_reason="refresh_timeout")
         if snapshot is not None:
+            owner_succeeded_shortly_after = False
+            if _inflight_task_done_at is not None:
+                owner_succeeded_shortly_after = (
+                    (_inflight_task_done_at - waiter_started_at).total_seconds() * 1000
+                ) <= (waiter_elapsed_ms + 1200.0)
             logger.warning(
-                "Shared prices refresh timed out; serving stale snapshot inflight_owner_rid=%s inflight_waiter_rid=%s waiter_timeout_ms=%.1f stale_served_reason=refresh_timeout stale_snapshot_used=true",
+                "follower_returning_stale rid=%s inflight_owner_rid=%s inflight_waiter_rid=%s waiter_timeout_ms=%.1f stale_served_reason=refresh_timeout stale_snapshot_used=true owner_succeeded_shortly_after_timeout=%s",
+                _price_request_id.get(),
                 _inflight_owner_rid or "none",
                 _price_request_id.get(),
                 waiter_elapsed_ms,
+                owner_succeeded_shortly_after,
             )
             return snapshot
         logger.error("Shared prices refresh timed out and no snapshot available")

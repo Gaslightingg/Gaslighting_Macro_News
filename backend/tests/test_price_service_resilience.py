@@ -431,6 +431,52 @@ async def test_owner_and_follower_return_fresh_without_timeout_fallback(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_follower_wait_budget_tracks_healthy_refresh_duration(monkeypatch, caplog):
+    async def refresh(*_args, **_kwargs):
+        await asyncio.sleep(3.0)
+        return PricesResponse(as_of="2026-01-01T00:00:00Z", tickers=[], errors={}, timed_out=False, summary={"ok_live": 7})
+
+    monkeypatch.setattr(price_service, "_refresh_prices_payload", refresh)
+    monkeypatch.setattr(price_service, "SHARED_WAITER_TIMEOUT_SECONDS", 2.2)
+    price_service._prices_refresh_task = None
+    caplog.set_level("INFO")
+
+    owner_task = asyncio.create_task(price_service.get_prices_payload(bypass_cache=True, request_id="owner-long"))
+    await asyncio.sleep(0.05)
+    follower_payload = await price_service.get_prices_payload(bypass_cache=True, request_id="follower-long")
+    owner_payload = await owner_task
+
+    assert owner_payload.timed_out is False
+    assert follower_payload.timed_out is False
+    assert "follower_path_returning_fresh rid=follower-long" in caplog.text
+    assert "timeout_branch_entered rid=follower-long" not in caplog.text
+    assert "follower_returning_stale rid=follower-long" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_multiple_followers_during_healthy_refresh_all_get_fresh(monkeypatch):
+    async def refresh(*_args, **_kwargs):
+        await asyncio.sleep(2.8)
+        return PricesResponse(as_of="2026-01-01T00:00:00Z", tickers=[], errors={}, timed_out=False, summary={"ok_live": 7})
+
+    monkeypatch.setattr(price_service, "_refresh_prices_payload", refresh)
+    monkeypatch.setattr(price_service, "SHARED_WAITER_TIMEOUT_SECONDS", 2.2)
+    price_service._prices_refresh_task = None
+
+    owner = asyncio.create_task(price_service.get_prices_payload(bypass_cache=True, request_id="owner-many"))
+    await asyncio.sleep(0.05)
+    followers = await asyncio.gather(
+        price_service.get_prices_payload(bypass_cache=True, request_id="follower-1"),
+        price_service.get_prices_payload(bypass_cache=True, request_id="follower-2"),
+        price_service.get_prices_payload(bypass_cache=True, request_id="follower-3"),
+    )
+    owner_payload = await owner
+
+    assert owner_payload.timed_out is False
+    assert all(payload.timed_out is False for payload in followers)
+
+
+@pytest.mark.asyncio
 async def test_cache_hit_returns_fast_payload(monkeypatch):
     async def refresh(*_args, **_kwargs):
         await asyncio.sleep(0.04)
