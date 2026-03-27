@@ -982,3 +982,66 @@ async def test_persistence_coalesces_older_symbol_updates(monkeypatch):
     await price_service._wait_for_persistence_idle()
 
     assert store.latest["sp500"]["value"] == 200.0
+
+
+@pytest.mark.asyncio
+async def test_spot_tasks_are_scheduled_without_stagger_with_low_configured_concurrency(monkeypatch):
+    configs = tuple(
+        PriceConfig(f"t{i}", f"T{i}", f"Ticker {i}", "fx", "USD", "", (), f"T{i}")
+        for i in range(7)
+    )
+    monkeypatch.setattr(price_service, "PRICE_TICKERS", configs)
+    monkeypatch.setattr(
+        price_service,
+        "get_settings",
+        lambda: type(
+            "S",
+            (),
+            {
+                "cache_ttl_prices": 0,
+                "price_fetch_timeout_seconds": 0.8,
+                "price_fetch_concurrency": 1,
+                "allow_seed_prices": False,
+                "debug_price_fetch": False,
+            },
+        )(),
+    )
+    call_times: dict[str, float] = {}
+
+    async def fake_build(config, *_args, **_kwargs):
+        call_times[config.id] = perf_counter()
+        await asyncio.sleep(0.02)
+        return {
+            "id": config.id,
+            "symbol": config.symbol,
+            "name": config.name,
+            "asset_class": config.asset_class,
+            "unit": config.unit,
+            "value": 1.0,
+            "change": 0.1,
+            "change_pct": 0.1,
+            "last_updated": "2026-01-01",
+            "as_of": "2026-01-01T00:00:00Z",
+            "source": "stooq",
+            "provider": "stooq",
+            "status": "live",
+            "quality": "high",
+            "provider_loop_started": True,
+            "first_attempt_started_at": datetime.utcnow().isoformat(),
+            "tried_sources": [f"stooq:{config.id}"],
+            "history_points": [],
+            "history_meta": {"data_start": None, "data_end": None, "interval": "1d", "points_count": 0},
+            "stale": False,
+        }
+
+    async def fake_store():
+        return _FakeStore()
+
+    monkeypatch.setattr(price_service, "_build_ticker_payload", fake_build)
+    monkeypatch.setattr(price_service, "_get_store", fake_store)
+
+    payload = await price_service.get_prices_payload(bypass_cache=True, request_id="spot-schedule")
+    assert payload.summary["ok_live"] == 7
+    assert len(call_times) == 7
+    spread = max(call_times.values()) - min(call_times.values())
+    assert spread < 0.15

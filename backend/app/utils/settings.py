@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     cache_ttl_signals: int = Field(default=600, validation_alias="CACHE_TTL_SIGNALS")
     cache_ttl_macro_seconds: int = Field(default=1800, validation_alias="CACHE_TTL_MACRO_SECONDS")
     price_fetch_timeout_seconds: float = Field(default=8.0, validation_alias="PRICE_FETCH_TIMEOUT_SECONDS")
-    price_fetch_concurrency: int = Field(default=4, validation_alias="PRICE_FETCH_CONCURRENCY")
+    price_fetch_concurrency: int = Field(default=8, validation_alias="PRICE_FETCH_CONCURRENCY")
     allow_seed_prices: bool = Field(default=False, validation_alias="ALLOW_SEED_PRICES")
     debug_price_fetch: bool = Field(default=False, validation_alias="DEBUG_PRICE_FETCH")
     news_provider: str = Field(default="auto", validation_alias="NEWS_PROVIDER")

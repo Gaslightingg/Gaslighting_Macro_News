@@ -229,6 +229,18 @@ def _parse_iso_timestamp(value: str | None) -> datetime | None:
     return None
 
 
+def _parse_datetime_flexible(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    parsed = _parse_iso_timestamp(value)
+    if parsed is not None:
+        return parsed
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def _should_replace_pending(existing: dict, incoming: dict) -> bool:
     existing_dt = _parse_iso_timestamp(existing.get("as_of"))
     incoming_dt = _parse_iso_timestamp(incoming.get("as_of"))
@@ -1076,25 +1088,39 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
     effective_timeout = min(settings.price_fetch_timeout_seconds, 1.8)
     cache_hit = False
     logger.info("Prices cache miss (bypass=%s)", bypass_cache)
+    refresh_started_at = datetime.utcnow()
+    spot_fetch_phase_started_at = datetime.utcnow()
 
     errors: dict[str, str] = {}
     timed_out = False
     refresh_deadline = perf_counter() + max(4.0, effective_timeout * 3)
+    effective_spot_concurrency = max(settings.price_fetch_concurrency, min(len(configs), 8))
+    _log_attempt(
+        "spot_fetch_phase_started_at=%s configured_concurrency=%s effective_spot_concurrency=%s tickers=%s",
+        spot_fetch_phase_started_at.isoformat(),
+        settings.price_fetch_concurrency,
+        effective_spot_concurrency,
+        len(configs),
+    )
     http_timeout = httpx.Timeout(
         timeout=effective_timeout,
         connect=min(1.0, effective_timeout),
     )
     async with httpx.AsyncClient(timeout=http_timeout) as client:
-        semaphore = asyncio.Semaphore(settings.price_fetch_concurrency)
+        semaphore = asyncio.Semaphore(effective_spot_concurrency)
         ticker_by_id: dict[str, dict] = {}
+        all_spot_tasks_scheduled_at: datetime | None = None
 
         async def run_for_ticker(config: PriceConfig, order: int) -> tuple[str, dict]:
             started = perf_counter()
+            scheduled_at = datetime.utcnow()
+            scheduled_at_iso = scheduled_at.isoformat()
             deadline_remaining_ms = max(0.0, (refresh_deadline - started) * 1000)
             _log_attempt(
-                "ticker=%s scheduler_start_order=%s deadline_remaining_ms=%.1f",
+                "ticker=%s scheduler_start_order=%s scheduled_at=%s deadline_remaining_ms=%.1f",
                 config.id,
                 order,
+                scheduled_at_iso,
                 deadline_remaining_ms,
             )
             try:
@@ -1146,6 +1172,7 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
             ticker["age_seconds"] = _age_seconds(ticker.get("last_updated"))
             ticker["freshness_seconds"] = int(LATEST_TTL.total_seconds())
             ticker["deadline_remaining_ms"] = round(max(0.0, (refresh_deadline - perf_counter()) * 1000), 2)
+            ticker["scheduled_at"] = scheduled_at_iso
             if "provider_loop_started" not in ticker:
                 ticker["provider_loop_started"] = bool(ticker.get("tried_sources"))
             if not ticker.get("tried_sources") and not ticker.get("no_attempts_reason"):
@@ -1159,6 +1186,11 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
                 ticker["no_attempts_reason"] = ticker.get("no_attempts_reason") or "provider_loop_flag_without_attempts"
             if (not ticker.get("provider_loop_started")) and ticker.get("tried_sources"):
                 ticker["provider_loop_started"] = True
+            first_attempt_at = _parse_datetime_flexible(ticker.get("first_attempt_started_at"))
+            delay_before_first_attempt_ms: float | None = None
+            if first_attempt_at is not None:
+                delay_before_first_attempt_ms = max(0.0, (first_attempt_at - scheduled_at).total_seconds() * 1000)
+            ticker["delay_before_first_attempt_ms"] = round(delay_before_first_attempt_ms, 2) if delay_before_first_attempt_ms is not None else None
             plan = get_provider_plan(config.id)
             planned_chain = [
                 f"{item.provider}:{item.symbol}"
@@ -1178,17 +1210,23 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
                 no_attempts_reason=ticker.get("no_attempts_reason"),
             )
             _log_attempt(
-                "ticker=%s provider_loop_started=%s first_attempt_started_at=%s deadline_remaining_ms=%.1f no_attempts_reason=%s cancellation_reason=%s",
+                "ticker=%s provider_loop_started=%s first_attempt_started_at=%s delay_before_first_attempt_ms=%s first_provider=%s final_latency_ms=%.1f deadline_remaining_ms=%.1f no_attempts_reason=%s cancellation_reason=%s",
                 config.id,
                 ticker.get("provider_loop_started"),
                 ticker.get("first_attempt_started_at") or "none",
+                ticker.get("delay_before_first_attempt_ms"),
+                (ticker.get("tried_sources") or ["none"])[0],
+                latency_ms,
                 ticker.get("deadline_remaining_ms") or 0.0,
                 ticker.get("no_attempts_reason"),
                 ticker.get("cancellation_reason") or "none",
             )
             return config.id, ticker
 
-        results = await asyncio.gather(*(run_for_ticker(config, idx) for idx, config in enumerate(configs)), return_exceptions=True)
+        tasks = [asyncio.create_task(run_for_ticker(config, idx)) for idx, config in enumerate(configs)]
+        all_spot_tasks_scheduled_at = datetime.utcnow()
+        _log_attempt("all_spot_tasks_scheduled_at=%s", all_spot_tasks_scheduled_at.isoformat())
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         for idx, result in enumerate(results):
             config = configs[idx]
             if isinstance(result, Exception):
@@ -1205,12 +1243,21 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
                 key, ticker = result
                 ticker_by_id[key] = ticker
 
+    spot_fetch_phase_completed_at = datetime.utcnow()
+    _log_attempt(
+        "spot_fetch_phase_completed_at=%s phase_duration_ms=%.1f",
+        spot_fetch_phase_completed_at.isoformat(),
+        (spot_fetch_phase_completed_at - spot_fetch_phase_started_at).total_seconds() * 1000,
+    )
     tickers = [_sanitize_ticker_numeric_fields(ticker_by_id.get(config.id)) for config in configs if ticker_by_id.get(config.id)]
     live_tickers_for_persistence = [
         ticker for ticker in tickers
         if ticker.get("status") == "live" and isinstance(ticker.get("value"), (int, float))
     ]
+    payload_built_at = datetime.utcnow()
+    _log_attempt("payload_built_at=%s", payload_built_at.isoformat())
     await _schedule_persistence(store, live_tickers_for_persistence, _price_request_id.get())
+    _log_attempt("persistence_enqueued_at=%s", datetime.utcnow().isoformat())
     for ticker in tickers:
         if ticker.get("error") or ticker.get("status") in {"error", "empty", "unsupported"}:
             errors[str(ticker.get("id"))] = str(ticker.get("error") or ticker.get("error_reason") or "error")
@@ -1228,7 +1275,7 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
     )
     duration_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
     logger.info(
-        "Prices fetch completed in %.1fms (tickers=%s, ok_live=%s, ok_cached=%s, stale_db=%s, empty=%s, error=%s, provider_attempt_errors=%s, timed_out=%s, cache_hit=%s)",
+        "Prices fetch completed in %.1fms (tickers=%s, ok_live=%s, ok_cached=%s, stale_db=%s, empty=%s, error=%s, provider_attempt_errors=%s, timed_out=%s, cache_hit=%s, refresh_started_at=%s, spot_fetch_phase_started_at=%s, all_spot_tasks_scheduled_at=%s, spot_fetch_phase_completed_at=%s, payload_built_at=%s)",
         duration_ms,
         len(tickers),
         summary.get("ok_live", 0),
@@ -1239,6 +1286,11 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
         summary.get("provider_attempt_errors", 0),
         timed_out,
         cache_hit,
+        refresh_started_at.isoformat(),
+        spot_fetch_phase_started_at.isoformat(),
+        all_spot_tasks_scheduled_at.isoformat() if all_spot_tasks_scheduled_at else "none",
+        spot_fetch_phase_completed_at.isoformat(),
+        payload_built_at.isoformat(),
     )
     async with _prices_cache_lock:
         if not bypass_cache:
