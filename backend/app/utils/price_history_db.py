@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 import logging
 from pathlib import Path
+import sqlite3
 from typing import Any
 
 import aiosqlite
@@ -27,6 +28,12 @@ class PriceHistoryStore:
         self._write_lock = asyncio.Lock()
         self._conn: aiosqlite.Connection | None = None
 
+    async def _configure_connection(self, conn: aiosqlite.Connection) -> None:
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA journal_mode=WAL")
+        await conn.execute("PRAGMA busy_timeout=8000")
+        await conn.execute("PRAGMA synchronous=NORMAL")
+
     async def _ensure_initialized(self) -> None:
         if self._initialized:
             return
@@ -35,10 +42,7 @@ class PriceHistoryStore:
                 return
 
             conn = await aiosqlite.connect(self.db_path)
-            conn.row_factory = aiosqlite.Row
-            await conn.execute("PRAGMA journal_mode=WAL")
-            await conn.execute("PRAGMA busy_timeout=5000")
-            await conn.execute("PRAGMA synchronous=NORMAL")
+            await self._configure_connection(conn)
 
             await conn.execute(
                 """
@@ -72,10 +76,6 @@ class PriceHistoryStore:
                 """
             )
 
-            # Idempotent migration: only add the column if it does not exist.
-            await self._add_column_if_missing(conn, "price_history", "value", "REAL")
-            await self._add_column_if_missing(conn, "price_latest", "value", "REAL")
-
             await self._log_schema(conn, "price_history")
             await self._log_schema(conn, "price_latest")
             await conn.commit()
@@ -83,25 +83,26 @@ class PriceHistoryStore:
             self._conn = conn
             self._initialized = True
 
+    async def _write_transaction(self, statements: list[tuple[str, tuple[Any, ...]]]) -> None:
+        async with self._write_lock:
+            conn = await aiosqlite.connect(self.db_path)
+            try:
+                await self._configure_connection(conn)
+                await conn.execute("BEGIN IMMEDIATE")
+                for sql, params in statements:
+                    await conn.execute(sql, params)
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+            finally:
+                await conn.close()
+
     async def _get_connection(self) -> aiosqlite.Connection:
         await self._ensure_initialized()
         if self._conn is None:
             raise RuntimeError("PriceHistoryStore connection is not initialized")
         return self._conn
-
-    async def _add_column_if_missing(
-        self,
-        conn: aiosqlite.Connection,
-        table_name: str,
-        column_name: str,
-        column_def: str,
-    ) -> None:
-        async with conn.execute(f"PRAGMA table_info({table_name})") as cur:
-            rows = await cur.fetchall()
-        existing_columns = {row[1] for row in rows}
-        if column_name in existing_columns:
-            return
-        await conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
 
     async def _log_schema(self, conn: aiosqlite.Connection, table_name: str) -> None:
         async with conn.execute(
@@ -115,7 +116,7 @@ class PriceHistoryStore:
     async def get_history(self, symbol: str) -> list[HistoryPoint]:
         conn = await self._get_connection()
         async with conn.execute(
-            "SELECT as_of AS date, price AS value FROM price_history WHERE symbol = ? ORDER BY as_of ASC",
+            "SELECT as_of AS date, COALESCE(price, value) AS value FROM price_history WHERE symbol = ? ORDER BY as_of ASC",
             (symbol,),
         ) as cur:
             rows = await cur.fetchall()
@@ -124,7 +125,6 @@ class PriceHistoryStore:
     async def upsert_history(self, symbol: str, points: list[HistoryPoint], source: str | None) -> None:
         if not points:
             return
-        conn = await self._get_connection()
         rows = [
             (
                 symbol,
@@ -135,22 +135,30 @@ class PriceHistoryStore:
             )
             for point in points
         ]
-        async with self._write_lock:
-            await conn.executemany(
-                """
-                INSERT OR REPLACE INTO price_history (symbol, price, change_pct, as_of, source)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                rows,
-            )
-            await conn.commit()
+        for attempt in range(3):
+            try:
+                await self._write_transaction([
+                    (
+                        """
+                        INSERT OR REPLACE INTO price_history (symbol, price, change_pct, as_of, source)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        row,
+                    )
+                    for row in rows
+                ])
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == 2:
+                    raise
+                await asyncio.sleep(0.15 * (attempt + 1))
 
     async def get_latest(self, symbol: str) -> dict[str, Any] | None:
         conn = await self._get_connection()
         async with conn.execute(
             """
             SELECT symbol,
-                   price AS value,
+                   COALESCE(price, value) AS value,
                    change_pct AS change,
                    change_pct AS change_pct,
                    as_of AS last_updated,
@@ -163,23 +171,66 @@ class PriceHistoryStore:
         return dict(row) if row else None
 
     async def upsert_latest(self, symbol: str, payload: dict[str, Any]) -> None:
-        conn = await self._get_connection()
-        async with self._write_lock:
-            await conn.execute(
-                """
-                INSERT OR REPLACE INTO price_latest (
-                    symbol, price, change_pct, as_of, source
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    symbol,
-                    payload.get("value"),
-                    payload.get("change_pct"),
-                    payload.get("last_updated"),
-                    payload.get("source"),
-                ),
-            )
-            await conn.commit()
+        for attempt in range(3):
+            try:
+                await self._write_transaction([
+                    (
+                        """
+                        INSERT OR REPLACE INTO price_latest (
+                            symbol, price, change_pct, as_of, source
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            symbol,
+                            payload.get("value"),
+                            payload.get("change_pct"),
+                            payload.get("last_updated"),
+                            payload.get("source"),
+                        ),
+                    )
+                ])
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == 2:
+                    raise
+                await asyncio.sleep(0.15 * (attempt + 1))
+
+    async def upsert_latest_with_meta(
+        self,
+        symbol: str,
+        payload: dict[str, Any],
+        meta_key: str,
+        meta_value: str,
+    ) -> None:
+        for attempt in range(3):
+            try:
+                await self._write_transaction(
+                    [
+                        (
+                            """
+                            INSERT OR REPLACE INTO price_latest (
+                                symbol, price, change_pct, as_of, source
+                            ) VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (
+                                symbol,
+                                payload.get("value"),
+                                payload.get("change_pct"),
+                                payload.get("last_updated"),
+                                payload.get("source"),
+                            ),
+                        ),
+                        (
+                            "INSERT OR REPLACE INTO cache_meta (key, value) VALUES (?, ?)",
+                            (meta_key, meta_value),
+                        ),
+                    ]
+                )
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == 2:
+                    raise
+                await asyncio.sleep(0.15 * (attempt + 1))
 
     async def get_meta(self, key: str) -> str | None:
         conn = await self._get_connection()
@@ -191,10 +242,13 @@ class PriceHistoryStore:
         return row[0] if row else None
 
     async def set_meta(self, key: str, value: str) -> None:
-        conn = await self._get_connection()
-        async with self._write_lock:
-            await conn.execute(
-                "INSERT OR REPLACE INTO cache_meta (key, value) VALUES (?, ?)",
-                (key, value),
-            )
-            await conn.commit()
+        for attempt in range(3):
+            try:
+                await self._write_transaction(
+                    [("INSERT OR REPLACE INTO cache_meta (key, value) VALUES (?, ?)", (key, value))]
+                )
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == 2:
+                    raise
+                await asyncio.sleep(0.15 * (attempt + 1))
