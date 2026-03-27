@@ -59,6 +59,7 @@ SHARED_WAITER_TIMEOUT_SECONDS = 2.2
 _persistence_worker_lock = asyncio.Lock()
 _persistence_worker_task: asyncio.Task | None = None
 _persistence_pending_by_symbol: dict[str, dict] = {}
+_shared_http_client: httpx.AsyncClient | None = None
 
 
 _store_cache: dict[str, PriceHistoryStore] = {}
@@ -107,6 +108,16 @@ def _set_provider_cooldown(provider: str, seconds: int) -> None:
 
 def _log_attempt(message: str, *args) -> None:
     logger.info("[PRICE_FETCH][rid=%s] " + message, _price_request_id.get(), *args)
+
+
+def _get_shared_http_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
+    global _shared_http_client
+    if _shared_http_client is None:
+        limits = httpx.Limits(max_connections=40, max_keepalive_connections=20)
+        _shared_http_client = httpx.AsyncClient(timeout=timeout, limits=limits, trust_env=False)
+    else:
+        _shared_http_client.timeout = timeout
+    return _shared_http_client
 
 
 def _sanitize_ticker_numeric_fields(ticker: dict) -> dict:
@@ -1137,142 +1148,155 @@ async def _refresh_prices_payload(*, bypass_cache: bool = False) -> PricesRespon
         timeout=effective_timeout,
         connect=min(1.0, effective_timeout),
     )
-    async with httpx.AsyncClient(timeout=http_timeout) as client:
-        semaphore = asyncio.Semaphore(effective_spot_concurrency)
-        ticker_by_id: dict[str, dict] = {}
-        all_spot_tasks_scheduled_at: datetime | None = None
+    pre_scheduling_started_at = datetime.utcnow()
+    client = _get_shared_http_client(http_timeout)
+    pre_scheduling_ready_at = datetime.utcnow()
+    _log_attempt(
+        "pre_scheduling_started_at=%s pre_scheduling_ready_at=%s pre_scheduling_duration_ms=%.1f",
+        pre_scheduling_started_at.isoformat(),
+        pre_scheduling_ready_at.isoformat(),
+        (pre_scheduling_ready_at - pre_scheduling_started_at).total_seconds() * 1000,
+    )
+    semaphore = asyncio.Semaphore(effective_spot_concurrency)
+    ticker_by_id: dict[str, dict] = {}
+    all_spot_tasks_scheduled_at: datetime | None = None
 
-        async def run_for_ticker(config: PriceConfig, order: int) -> tuple[str, dict]:
-            started = perf_counter()
-            scheduled_at = datetime.utcnow()
-            scheduled_at_iso = scheduled_at.isoformat()
-            deadline_remaining_ms = max(0.0, (refresh_deadline - started) * 1000)
-            _log_attempt(
-                "ticker=%s scheduler_start_order=%s scheduled_at=%s deadline_remaining_ms=%.1f",
-                config.id,
-                order,
-                scheduled_at_iso,
-                deadline_remaining_ms,
-            )
-            try:
-                if deadline_remaining_ms <= 1:
-                    ticker = await _build_cached_payload(
-                        config,
-                        store,
-                        error="deadline_exhausted",
-                        allow_seed=settings.allow_seed_prices,
-                    )
-                    ticker["provider_loop_started"] = False
-                    ticker["no_attempts_reason"] = "global_deadline_exceeded_before_attempts"
-                    ticker["cancellation_reason"] = "global_deadline_exceeded_before_attempts"
-                    ticker["deadline_remaining_ms"] = 0.0
-                    return config.id, ticker
-                ticker = await _build_ticker_payload(
-                    config,
-                    store,
-                    client,
-                    semaphore,
-                    timeout_seconds=effective_timeout,
-                    allow_seed=settings.allow_seed_prices,
-                )
-            except asyncio.TimeoutError:
-                nonlocal timed_out
-                timed_out = True
+    async def run_for_ticker(config: PriceConfig, order: int) -> tuple[str, dict]:
+        started = perf_counter()
+        scheduled_at = datetime.utcnow()
+        scheduled_at_iso = scheduled_at.isoformat()
+        deadline_remaining_ms = max(0.0, (refresh_deadline - started) * 1000)
+        _log_attempt(
+            "ticker=%s scheduler_start_order=%s scheduled_at=%s deadline_remaining_ms=%.1f",
+            config.id,
+            order,
+            scheduled_at_iso,
+            deadline_remaining_ms,
+        )
+        try:
+            if deadline_remaining_ms <= 1:
                 ticker = await _build_cached_payload(
                     config,
                     store,
-                    error="timeout",
+                    error="deadline_exhausted",
                     allow_seed=settings.allow_seed_prices,
                 )
                 ticker["provider_loop_started"] = False
-                ticker["no_attempts_reason"] = "cancelled_before_provider_loop"
-                ticker["cancellation_reason"] = "ticker_timeout_before_first_attempt"
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Ticker fetch failed for %s: %s", config.id, exc)
-                ticker = await _build_cached_payload(
-                    config,
-                    store,
-                    error=f"provider_error:{exc}",
-                    allow_seed=settings.allow_seed_prices,
-                )
-                ticker["provider_loop_started"] = False
-                ticker["no_attempts_reason"] = "provider_tasks_not_awaited"
-                ticker["cancellation_reason"] = "provider_task_exception"
-            latency_ms = (perf_counter() - started) * 1000
-            ticker["fetch_latency_ms"] = round(latency_ms, 2)
-            ticker["age_seconds"] = _age_seconds(ticker.get("last_updated"))
-            ticker["freshness_seconds"] = int(LATEST_TTL.total_seconds())
-            ticker["deadline_remaining_ms"] = round(max(0.0, (refresh_deadline - perf_counter()) * 1000), 2)
-            ticker["scheduled_at"] = scheduled_at_iso
-            if "provider_loop_started" not in ticker:
-                ticker["provider_loop_started"] = bool(ticker.get("tried_sources"))
-            if not ticker.get("tried_sources") and not ticker.get("no_attempts_reason"):
-                ticker["no_attempts_reason"] = "no_attempts_executed"
-            if ticker.get("provider_loop_started") and not ticker.get("tried_sources"):
-                logger.warning(
-                    "ticker=%s provider_loop_started=true but attempted_chain is empty; resetting flag",
-                    config.id,
-                )
-                ticker["provider_loop_started"] = False
-                ticker["no_attempts_reason"] = ticker.get("no_attempts_reason") or "provider_loop_flag_without_attempts"
-            if (not ticker.get("provider_loop_started")) and ticker.get("tried_sources"):
-                ticker["provider_loop_started"] = True
-            first_attempt_at = _parse_datetime_flexible(ticker.get("first_attempt_started_at"))
-            delay_before_first_attempt_ms: float | None = None
-            if first_attempt_at is not None:
-                delay_before_first_attempt_ms = max(0.0, (first_attempt_at - scheduled_at).total_seconds() * 1000)
-            ticker["delay_before_first_attempt_ms"] = round(delay_before_first_attempt_ms, 2) if delay_before_first_attempt_ms is not None else None
-            plan = get_provider_plan(config.id)
-            planned_chain = [
-                f"{item.provider}:{item.symbol}"
-                for item in (plan.latest_chain if plan else ())
-            ]
-            _log_ticker_result(
-                config=config,
-                provider=ticker.get("provider") or ticker.get("source"),
-                status=str(ticker.get("status") or "unknown"),
-                source=ticker.get("source"),
-                latency_ms=latency_ms,
-                error_reason=ticker.get("error_reason") or ticker.get("error"),
-                fallback_chain=list(ticker.get("tried_sources") or []),
-                planned_chain=planned_chain,
-                provider_loop_started=ticker.get("provider_loop_started"),
-                deadline_remaining_ms=ticker.get("deadline_remaining_ms"),
-                no_attempts_reason=ticker.get("no_attempts_reason"),
+                ticker["no_attempts_reason"] = "global_deadline_exceeded_before_attempts"
+                ticker["cancellation_reason"] = "global_deadline_exceeded_before_attempts"
+                ticker["deadline_remaining_ms"] = 0.0
+                return config.id, ticker
+            ticker = await _build_ticker_payload(
+                config,
+                store,
+                client,
+                semaphore,
+                timeout_seconds=effective_timeout,
+                allow_seed=settings.allow_seed_prices,
             )
-            _log_attempt(
-                "ticker=%s provider_loop_started=%s first_attempt_started_at=%s delay_before_first_attempt_ms=%s first_provider=%s final_latency_ms=%.1f deadline_remaining_ms=%.1f no_attempts_reason=%s cancellation_reason=%s",
+        except asyncio.TimeoutError:
+            nonlocal timed_out
+            timed_out = True
+            ticker = await _build_cached_payload(
+                config,
+                store,
+                error="timeout",
+                allow_seed=settings.allow_seed_prices,
+            )
+            ticker["provider_loop_started"] = False
+            ticker["no_attempts_reason"] = "cancelled_before_provider_loop"
+            ticker["cancellation_reason"] = "ticker_timeout_before_first_attempt"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Ticker fetch failed for %s: %s", config.id, exc)
+            ticker = await _build_cached_payload(
+                config,
+                store,
+                error=f"provider_error:{exc}",
+                allow_seed=settings.allow_seed_prices,
+            )
+            ticker["provider_loop_started"] = False
+            ticker["no_attempts_reason"] = "provider_tasks_not_awaited"
+            ticker["cancellation_reason"] = "provider_task_exception"
+        latency_ms = (perf_counter() - started) * 1000
+        ticker["fetch_latency_ms"] = round(latency_ms, 2)
+        age_reference = ticker.get("as_of") if ticker.get("status") == "live" else ticker.get("last_updated")
+        ticker["age_seconds"] = _age_seconds(age_reference)
+        ticker["freshness_seconds"] = int(LATEST_TTL.total_seconds())
+        ticker["deadline_remaining_ms"] = round(max(0.0, (refresh_deadline - perf_counter()) * 1000), 2)
+        ticker["scheduled_at"] = scheduled_at_iso
+        if "provider_loop_started" not in ticker:
+            ticker["provider_loop_started"] = bool(ticker.get("tried_sources"))
+        if not ticker.get("tried_sources") and not ticker.get("no_attempts_reason"):
+            ticker["no_attempts_reason"] = "no_attempts_executed"
+        if ticker.get("provider_loop_started") and not ticker.get("tried_sources"):
+            logger.warning(
+                "ticker=%s provider_loop_started=true but attempted_chain is empty; resetting flag",
                 config.id,
-                ticker.get("provider_loop_started"),
-                ticker.get("first_attempt_started_at") or "none",
-                ticker.get("delay_before_first_attempt_ms"),
-                (ticker.get("tried_sources") or ["none"])[0],
-                latency_ms,
-                ticker.get("deadline_remaining_ms") or 0.0,
-                ticker.get("no_attempts_reason"),
-                ticker.get("cancellation_reason") or "none",
             )
-            return config.id, ticker
+            ticker["provider_loop_started"] = False
+            ticker["no_attempts_reason"] = ticker.get("no_attempts_reason") or "provider_loop_flag_without_attempts"
+        if (not ticker.get("provider_loop_started")) and ticker.get("tried_sources"):
+            ticker["provider_loop_started"] = True
+        first_attempt_at = _parse_datetime_flexible(ticker.get("first_attempt_started_at"))
+        delay_before_first_attempt_ms: float | None = None
+        if first_attempt_at is not None:
+            delay_before_first_attempt_ms = max(0.0, (first_attempt_at - scheduled_at).total_seconds() * 1000)
+        ticker["delay_before_first_attempt_ms"] = round(delay_before_first_attempt_ms, 2) if delay_before_first_attempt_ms is not None else None
+        plan = get_provider_plan(config.id)
+        planned_chain = [
+            f"{item.provider}:{item.symbol}"
+            for item in (plan.latest_chain if plan else ())
+        ]
+        _log_ticker_result(
+            config=config,
+            provider=ticker.get("provider") or ticker.get("source"),
+            status=str(ticker.get("status") or "unknown"),
+            source=ticker.get("source"),
+            latency_ms=latency_ms,
+            error_reason=ticker.get("error_reason") or ticker.get("error"),
+            fallback_chain=list(ticker.get("tried_sources") or []),
+            planned_chain=planned_chain,
+            provider_loop_started=ticker.get("provider_loop_started"),
+            deadline_remaining_ms=ticker.get("deadline_remaining_ms"),
+            no_attempts_reason=ticker.get("no_attempts_reason"),
+        )
+        _log_attempt(
+            "ticker=%s provider_loop_started=%s first_attempt_started_at=%s delay_before_first_attempt_ms=%s first_provider=%s final_latency_ms=%.1f deadline_remaining_ms=%.1f no_attempts_reason=%s cancellation_reason=%s",
+            config.id,
+            ticker.get("provider_loop_started"),
+            ticker.get("first_attempt_started_at") or "none",
+            ticker.get("delay_before_first_attempt_ms"),
+            (ticker.get("tried_sources") or ["none"])[0],
+            latency_ms,
+            ticker.get("deadline_remaining_ms") or 0.0,
+            ticker.get("no_attempts_reason"),
+            ticker.get("cancellation_reason") or "none",
+        )
+        return config.id, ticker
 
-        tasks = [asyncio.create_task(run_for_ticker(config, idx)) for idx, config in enumerate(configs)]
-        all_spot_tasks_scheduled_at = datetime.utcnow()
-        _log_attempt("all_spot_tasks_scheduled_at=%s", all_spot_tasks_scheduled_at.isoformat())
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for idx, result in enumerate(results):
-            config = configs[idx]
-            if isinstance(result, Exception):
-                logger.warning("Ticker task failed for %s: %s", config.id, result)
-                ticker = await _build_cached_payload(
-                    config,
-                    store,
-                    error="task_failed",
-                    allow_seed=settings.allow_seed_prices,
-                )
-                ticker["error_reason"] = ticker.get("error_reason") or "task_failed"
-                ticker_by_id[config.id] = ticker
-            else:
-                key, ticker = result
-                ticker_by_id[key] = ticker
+    tasks = [asyncio.create_task(run_for_ticker(config, idx)) for idx, config in enumerate(configs)]
+    all_spot_tasks_scheduled_at = datetime.utcnow()
+    _log_attempt(
+        "all_spot_tasks_scheduled_at=%s pre_scheduling_duration_ms=%.1f",
+        all_spot_tasks_scheduled_at.isoformat(),
+        (all_spot_tasks_scheduled_at - pre_scheduling_started_at).total_seconds() * 1000,
+    )
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for idx, result in enumerate(results):
+        config = configs[idx]
+        if isinstance(result, Exception):
+            logger.warning("Ticker task failed for %s: %s", config.id, result)
+            ticker = await _build_cached_payload(
+                config,
+                store,
+                error="task_failed",
+                allow_seed=settings.allow_seed_prices,
+            )
+            ticker["error_reason"] = ticker.get("error_reason") or "task_failed"
+            ticker_by_id[config.id] = ticker
+        else:
+            key, ticker = result
+            ticker_by_id[key] = ticker
 
     spot_fetch_phase_completed_at = datetime.utcnow()
     _log_attempt(

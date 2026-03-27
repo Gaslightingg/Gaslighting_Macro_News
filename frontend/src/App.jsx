@@ -47,6 +47,27 @@ const describePriceStatus = (ticker) => {
   return details ? `${label}: ${details}` : label;
 };
 
+const describePriceAvailability = (ticker) => {
+  const status = ticker?.status ?? "empty";
+  if (status === "live") {
+    return ticker?.history_meta?.data_start ? `Data since ${ticker.history_meta.data_start}` : "Live snapshot loaded";
+  }
+  if (status === "cached") return "Cached snapshot loaded";
+  if (status === "stale") return "Fallback data from last known values";
+  if (status === "empty") return "Data availability pending";
+  if (status === "unsupported") return "Unsupported data source";
+  return "No reliable data available";
+};
+
+const formatAge = (ticker) => {
+  const age = ticker?.age_seconds;
+  if (typeof age !== "number" || !Number.isFinite(age) || age < 0) return "N/A";
+  if ((ticker?.status ?? "unknown") === "live" && age > 3600) return "N/A";
+  if (age < 120) return `${Math.round(age)}s`;
+  if (age < 7200) return `${Math.round(age / 60)}m`;
+  return `${Math.round(age / 3600)}h`;
+};
+
 const formatPointDate = (timestamp) => {
   if (!Number.isFinite(timestamp)) return "N/A";
   return new Date(timestamp).toISOString().slice(0, 10);
@@ -1052,10 +1073,12 @@ function App() {
       <section className="section" id="prices">
         <div className="section-header"><h2>Prices</h2><span className="section-meta">Spot + history</span></div>
         <div className="grid prices-grid">
-          {prices?.tickers?.length
+              {prices?.tickers?.length
             ? prices.tickers.map((ticker) => {
                 const tone = typeof ticker.change === "number" && ticker.change < 0 ? "negative" : "positive";
                 const statusDescription = describePriceStatus(ticker);
+                const availabilityText = describePriceAvailability(ticker);
+                const providerLabel = ticker.provider ?? ticker.source ?? "N/A";
                 return (
                   <article key={ticker.id} className="panel card fade-up">
                     <div className="card-row">
@@ -1065,13 +1088,13 @@ function App() {
                     <p className={`change ${tone}`}>{formatChange(ticker.change)}</p>
                     <Sparkline values={ticker.history_points?.map((p) => p.value) ?? []} tone={tone} />
                     <span className="ticker-meta">
-                      {ticker.history_meta?.data_start ? `Data since ${ticker.history_meta.data_start}` : "Data availability pending"}
+                      {availabilityText}
                     </span>
                     <span className="ticker-meta">
                       {statusDescription}
                     </span>
                     <span className="ticker-meta">
-                      Provider: {ticker.provider ?? ticker.source ?? "N/A"} · Age: {typeof ticker.age_seconds === "number" ? `${ticker.age_seconds}s` : "N/A"}
+                      Provider: {providerLabel} · Age: {formatAge(ticker)}
                     </span>
                     {typeof ticker.value !== "number" && (ticker.error_reason || ticker.error) ? (
                       <span className="ticker-meta warning">
