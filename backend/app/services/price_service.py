@@ -188,13 +188,22 @@ def _build_prices_summary(tickers: list[dict]) -> dict[str, int]:
 
 
 async def _persist_latest_with_retry(store: PriceHistoryStore, ticker_id: str, latest_payload: dict) -> None:
+    updated_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     for attempt in range(3):
         try:
-            await store.upsert_latest(ticker_id, latest_payload)
-            await store.set_meta(
-                f"latest:{ticker_id}:updated_at",
-                datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-            )
+            if hasattr(store, "upsert_latest_with_meta"):
+                await store.upsert_latest_with_meta(
+                    ticker_id,
+                    latest_payload,
+                    f"latest:{ticker_id}:updated_at",
+                    updated_at,
+                )
+            else:
+                await store.upsert_latest(ticker_id, latest_payload)
+                await store.set_meta(
+                    f"latest:{ticker_id}:updated_at",
+                    updated_at,
+                )
             return
         except sqlite3.OperationalError as exc:
             if "locked" not in str(exc).lower() or attempt == 2:
@@ -321,8 +330,10 @@ async def _schedule_persistence(store: PriceHistoryStore, tickers: list[dict], r
             skipped,
             len(_persistence_pending_by_symbol),
         )
+        if replaced:
+            logger.info("persistence_batch_coalesced rid=%s symbols_replaced=%s", request_id, replaced)
         if _persistence_worker_task and not _persistence_worker_task.done():
-            logger.info("persistence_batch_waiting_for_writer rid=%s", request_id)
+            logger.info("persistence_batch_waiting rid=%s", request_id)
             return
         _persistence_worker_task = asyncio.create_task(_run_persistence_worker(store))
 
