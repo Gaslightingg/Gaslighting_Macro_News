@@ -30,6 +30,15 @@ const formatValue = (value, unit) => {
   return unit ? `${value.toFixed(2)} ${unit}` : value.toFixed(2);
 };
 
+const toModifierClass = (value, fallback = "unknown") => {
+  const normalized = String(value ?? fallback)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || fallback;
+};
+
 const PRICE_STATUS_TEXT = {
   live: "Live data",
   cached: "Cached snapshot",
@@ -1151,7 +1160,7 @@ function App() {
                       <span className={`table-change ${tone}`}>{formatChange(latest?.change)}</span>
                       <span className={`table-date ${reason && isUnavailable ? "table-reason" : ""}`}>{updatedLabel}</span>
                       <span className={`status-badge ${status}`}>{status}</span>
-                      <span className={`quality-badge ${qualityLabel}`}>{qualityLabel}</span>
+                      <span className={`quality-badge ${toModifierClass(qualityLabel)}`}>{qualityLabel}</span>
                       <button
                         type="button"
                         className="chart-btn"

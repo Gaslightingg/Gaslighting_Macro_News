@@ -6,7 +6,8 @@ def test_provider_map_contains_all_instruments():
     assert set(PROVIDER_MAP.keys()) == expected
 
 
-def test_index_instruments_use_yfinance_primary():
-    assert PROVIDER_MAP["sp500"].latest_chain[0].symbol == "^GSPC"
-    assert PROVIDER_MAP["nas100"].latest_chain[0].symbol == "^NDX"
+def test_index_instruments_have_stooq_index_fallbacks():
+    assert PROVIDER_MAP["sp500"].latest_chain[0].symbol == "^spx"
+    assert PROVIDER_MAP["nas100"].latest_chain[0].symbol == "^ndx"
     assert PROVIDER_MAP["nqmini"].latest_chain[0].symbol == "MNQ=F"
+    assert PROVIDER_MAP["nqmini"].latest_chain[-1].symbol == "^ndx"

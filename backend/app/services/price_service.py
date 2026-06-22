@@ -35,9 +35,7 @@ HISTORY_TTL = timedelta(hours=24)
 SPARKLINE_POINTS = 120
 UNSUPPORTED_PROVIDER_SYMBOLS: dict[tuple[str, str], str] = {
     ("stooq", "spx"): "unsupported_symbol",
-    ("stooq", "^spx"): "unsupported_symbol",
     ("stooq", "ndx"): "unsupported_symbol",
-    ("stooq", "^ndx"): "unsupported_symbol",
     ("stooq", "nq.f"): "unsupported_symbol",
     ("stooq", "nq=f"): "unsupported_symbol",
 }
@@ -423,6 +421,13 @@ def _history_meta(points: list[HistoryPoint]) -> PriceHistoryMeta:
     )
 
 
+def _response_snippet(response: httpx.Response | None, limit: int = 300) -> str:
+    if response is None:
+        return ""
+    text = (response.text or "").replace("\r", " ").replace("\n", " ").strip()
+    return text[:limit]
+
+
 async def _request_with_retries(
     client: httpx.AsyncClient,
     url: str,
@@ -431,32 +436,54 @@ async def _request_with_retries(
 ) -> httpx.Response | None:
     attempt = 0
     while True:
+        request = client.build_request("GET", url, params=params)
+        request_url = str(request.url)
         try:
-            response = await client.get(url, params=params)
+            logger.info("HTTP price provider request method=GET url=%s attempt=%s", request_url, attempt + 1)
+            response = await client.send(request)
+            logger.info(
+                "HTTP price provider response url=%s status=%s bytes=%s",
+                request_url,
+                response.status_code,
+                len(response.content or b""),
+            )
             response.raise_for_status()
             return response
         except httpx.HTTPStatusError as exc:
             attempt += 1
             status_code = exc.response.status_code if exc.response is not None else None
+            body_snippet = _response_snippet(exc.response)
             if status_code == 429:
-                if "query1.finance.yahoo.com" in url:
-                    symbol = url.rstrip("/").split("/")[-1]
+                if "query1.finance.yahoo.com" in request_url or "query2.finance.yahoo.com" in request_url:
+                    symbol = request_url.rstrip("/").split("/")[-1].split("?", 1)[0]
                     _set_provider_cooldown(_yfinance_symbol_key(symbol), seconds=45)
                     _set_provider_cooldown("yfinance", seconds=8)
-                logger.warning("Rate limit for %s (status=429), enabling cooldown", url)
+                logger.warning(
+                    "Rate limit for price provider url=%s status=429 body_snippet=%r; enabling cooldown",
+                    request_url,
+                    body_snippet,
+                )
                 return None
             # 4xx is usually a permanent error (bad symbol/params), so retrying only adds latency.
             if status_code is not None and 400 <= status_code < 500:
                 logger.warning(
-                    "Request failed for %s with status=%s: %s",
-                    url,
+                    "Price provider request failed url=%s status=%s body_snippet=%r error=%s",
+                    request_url,
                     status_code,
+                    body_snippet,
                     exc,
                 )
                 return None
             backoff = 0.4 * attempt
             if attempt > retries:
-                logger.warning("Request failed for %s after %s attempts: %s", url, attempt, exc)
+                logger.warning(
+                    "Price provider request failed url=%s status=%s attempts=%s body_snippet=%r error=%s",
+                    request_url,
+                    status_code,
+                    attempt,
+                    body_snippet,
+                    exc,
+                )
                 return None
             await asyncio.sleep(backoff)
         except httpx.RequestError as exc:
@@ -464,9 +491,10 @@ async def _request_with_retries(
             backoff = 0.4 * attempt
             if attempt > retries:
                 logger.warning(
-                    "Connection failed for %s after %s attempts: %s",
-                    url,
+                    "Price provider connection failed url=%s attempts=%s error_type=%s error=%s",
+                    request_url,
                     attempt,
+                    type(exc).__name__,
                     exc,
                 )
                 return None
@@ -1677,7 +1705,7 @@ async def get_price_history_payload(symbol: str, range_key: str) -> PriceHistory
     store = await _get_store()
     settings = get_settings()
     timeout_seconds = min(settings.price_fetch_timeout_seconds, 6.0)
-    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+    async with httpx.AsyncClient(timeout=timeout_seconds, trust_env=False) as client:
         history = await _ensure_history(store, client, config, timeout_seconds)
 
     meta = _history_meta(history)
