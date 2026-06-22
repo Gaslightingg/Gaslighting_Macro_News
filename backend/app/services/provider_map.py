@@ -18,24 +18,24 @@ class InstrumentProviderPlan:
 PROVIDER_MAP: dict[str, InstrumentProviderPlan] = {
     "sp500": InstrumentProviderPlan(
         latest_chain=(
-            ProviderAttempt("stooq", "spy.us"),
+            ProviderAttempt("stooq", "^spx"),
             ProviderAttempt("yfinance", "^GSPC"),
             ProviderAttempt("yfinance", "SPY"),
         ),
         history_chain=(
-            ProviderAttempt("stooq", "spy.us"),
+            ProviderAttempt("stooq", "^spx"),
             ProviderAttempt("yfinance", "^GSPC"),
             ProviderAttempt("yfinance", "SPY"),
         ),
     ),
     "nas100": InstrumentProviderPlan(
         latest_chain=(
-            ProviderAttempt("stooq", "qqq.us"),
+            ProviderAttempt("stooq", "^ndx"),
             ProviderAttempt("yfinance", "^NDX"),
             ProviderAttempt("yfinance", "QQQ"),
         ),
         history_chain=(
-            ProviderAttempt("stooq", "qqq.us"),
+            ProviderAttempt("stooq", "^ndx"),
             ProviderAttempt("yfinance", "^NDX"),
             ProviderAttempt("yfinance", "QQQ"),
         ),
@@ -44,14 +44,12 @@ PROVIDER_MAP: dict[str, InstrumentProviderPlan] = {
         latest_chain=(
             ProviderAttempt("yfinance", "MNQ=F"),
             ProviderAttempt("yfinance", "NQ=F"),
-            ProviderAttempt("stooq", "qqq.us"),
-            ProviderAttempt("stooq", "ndx.us"),
+            ProviderAttempt("stooq", "^ndx"),
         ),
         history_chain=(
             ProviderAttempt("yfinance", "MNQ=F"),
             ProviderAttempt("yfinance", "NQ=F"),
-            ProviderAttempt("stooq", "qqq.us"),
-            ProviderAttempt("stooq", "ndx.us"),
+            ProviderAttempt("stooq", "^ndx"),
         ),
     ),
     "eurusd": InstrumentProviderPlan(

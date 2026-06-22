@@ -23,7 +23,7 @@ cp .env.example .env
 Key variables for real data mode:
 
 - `MARKET_DATA_PROVIDER=real` (or `auto`) to enable live data fetching.
-- `FRED_API_KEY` and `BEA_API_KEY` for macro data.
+- `FRED_API_KEY` and `BEA_API_KEY` for macro data (see `docs/market_data_troubleshooting.md` for the full provider path and a `.env` example).
 - `MARKET_DATA_DB_PATH` for the local SQLite cache.
 - `BACKEND_CORS_ORIGINS` (comma-separated) to allow frontend origins (default `*`).
 - `VITE_API_URL` to override the API base URL in the frontend (defaults to the current host on port 8000).
