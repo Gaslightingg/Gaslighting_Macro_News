@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -62,6 +62,13 @@ class Settings(BaseSettings):
     telegram_allowed_user_id: Optional[int] = Field(default=None, validation_alias="TELEGRAM_ALLOWED_USER_ID")
     telegram_allowed_chat_id: Optional[int] = Field(default=None, validation_alias="TELEGRAM_ALLOWED_CHAT_ID")
     api_base_url: str = Field(default="http://127.0.0.1:8000", validation_alias="API_BASE_URL")
+
+    @field_validator("telegram_allowed_user_id", "telegram_allowed_chat_id", mode="before")
+    @classmethod
+    def _empty_optional_int_as_none(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     def resolved_database_path(self) -> Path:
         path = Path(self.database_path)
