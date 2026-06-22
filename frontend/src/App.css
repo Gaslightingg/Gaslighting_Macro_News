@@ -450,7 +450,7 @@ body {
 .status-badge.unsupported,
 .quality-badge.low,
 .quality-badge.disabled,
-.quality-badge.n\\/a {
+.quality-badge.n-a {
   color: var(--short);
   border-color: color-mix(in srgb, var(--short), transparent 50%);
 }
