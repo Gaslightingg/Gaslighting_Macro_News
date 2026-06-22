@@ -76,6 +76,7 @@ class PriceHistoryStore:
                 """
             )
 
+            await self._migrate_price_columns(conn)
             await self._log_schema(conn, "price_history")
             await self._log_schema(conn, "price_latest")
             await conn.commit()
@@ -84,6 +85,7 @@ class PriceHistoryStore:
             self._initialized = True
 
     async def _write_transaction(self, statements: list[tuple[str, tuple[Any, ...]]]) -> None:
+        await self._ensure_initialized()
         async with self._write_lock:
             conn = await aiosqlite.connect(self.db_path)
             try:
@@ -104,6 +106,64 @@ class PriceHistoryStore:
             raise RuntimeError("PriceHistoryStore connection is not initialized")
         return self._conn
 
+    async def _table_columns(self, conn: aiosqlite.Connection, table_name: str) -> set[str]:
+        async with conn.execute(f"PRAGMA table_info({table_name})") as cur:
+            rows = await cur.fetchall()
+        return {row["name"] for row in rows}
+
+    async def _migrate_price_columns(self, conn: aiosqlite.Connection) -> None:
+        history_columns = await self._table_columns(conn, "price_history")
+        if "value" in history_columns:
+            history_price_expr = "COALESCE(price, value)" if "price" in history_columns else "value"
+            logger.info("Migrating price_history schema from legacy value column to price column")
+            await conn.execute("ALTER TABLE price_history RENAME TO price_history_legacy")
+            await conn.execute(
+                """
+                CREATE TABLE price_history (
+                    symbol TEXT NOT NULL,
+                    price REAL NOT NULL,
+                    change_pct REAL,
+                    as_of TEXT NOT NULL,
+                    source TEXT,
+                    PRIMARY KEY (symbol, as_of)
+                )
+                """
+            )
+            await conn.execute(
+                """
+                INSERT OR REPLACE INTO price_history (symbol, price, change_pct, as_of, source)
+                SELECT symbol, {price_expr}, change_pct, as_of, source
+                FROM price_history_legacy
+                WHERE {price_expr} IS NOT NULL
+                """.format(price_expr=history_price_expr)
+            )
+            await conn.execute("DROP TABLE price_history_legacy")
+
+        latest_columns = await self._table_columns(conn, "price_latest")
+        if "value" in latest_columns:
+            latest_price_expr = "COALESCE(price, value)" if "price" in latest_columns else "value"
+            logger.info("Migrating price_latest schema from legacy value column to price column")
+            await conn.execute("ALTER TABLE price_latest RENAME TO price_latest_legacy")
+            await conn.execute(
+                """
+                CREATE TABLE price_latest (
+                    symbol TEXT PRIMARY KEY,
+                    price REAL,
+                    change_pct REAL,
+                    as_of TEXT,
+                    source TEXT
+                )
+                """
+            )
+            await conn.execute(
+                """
+                INSERT OR REPLACE INTO price_latest (symbol, price, change_pct, as_of, source)
+                SELECT symbol, {price_expr}, change_pct, as_of, source
+                FROM price_latest_legacy
+                """.format(price_expr=latest_price_expr)
+            )
+            await conn.execute("DROP TABLE price_latest_legacy")
+
     async def _log_schema(self, conn: aiosqlite.Connection, table_name: str) -> None:
         async with conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
@@ -116,7 +176,7 @@ class PriceHistoryStore:
     async def get_history(self, symbol: str) -> list[HistoryPoint]:
         conn = await self._get_connection()
         async with conn.execute(
-            "SELECT as_of AS date, COALESCE(price, value) AS value FROM price_history WHERE symbol = ? ORDER BY as_of ASC",
+            "SELECT as_of AS date, price AS value FROM price_history WHERE symbol = ? ORDER BY as_of ASC",
             (symbol,),
         ) as cur:
             rows = await cur.fetchall()
@@ -158,7 +218,7 @@ class PriceHistoryStore:
         async with conn.execute(
             """
             SELECT symbol,
-                   COALESCE(price, value) AS value,
+                   price AS value,
                    change_pct AS change,
                    change_pct AS change_pct,
                    as_of AS last_updated,
